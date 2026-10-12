@@ -4,6 +4,7 @@ import inspect
 import json
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Annotated, cast
 
@@ -19,6 +20,7 @@ BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
 REGISTRY_FILE = BASE_DIR / "data" / "servers.json"
+HEALTH_FILE = BASE_DIR / "data" / "health.json"
 
 GATEWAY_HOST = os.getenv("GATEWAY_HOST", "127.0.0.1")
 GATEWAY_PORT = int(os.getenv("GATEWAY_PORT", "8100"))
@@ -46,6 +48,76 @@ def read_registry() -> list[dict]:
         raise ValueError("Server registry must be a JSON list.")
 
     return data
+
+
+def utc_now() -> str:
+    """Return the current UTC time as an ISO-8601 string."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def read_health_status() -> dict:
+    """Read saved health information."""
+    if not HEALTH_FILE.exists():
+        return {}
+
+    try:
+        with HEALTH_FILE.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+
+        return data if isinstance(data, dict) else {}
+
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Could not read health status: {exc}")
+        return {}
+
+
+def write_health_status(status: dict) -> None:
+    """Atomically save health information."""
+    HEALTH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temp_file = HEALTH_FILE.with_suffix(".tmp")
+
+    with temp_file.open("w", encoding="utf-8") as file:
+        json.dump(status, file, indent=2)
+
+    os.replace(temp_file, HEALTH_FILE)
+
+
+def update_server_health(
+    health_status: dict,
+    server: dict,
+    status: str,
+    error: str | None = None,
+    discovered_tools_count: int | None = None,
+) -> None:
+    """Update the health record for one registered server."""
+    server_id = server["id"]
+    previous = health_status.get(server_id, {})
+    checked_at = utc_now()
+
+    entry = {
+        "server_id": server_id,
+        "name": server["name"],
+        "url": server["url"],
+        "status": status,
+        "last_checked": checked_at,
+        "last_successful_check": previous.get(
+            "last_successful_check"
+        ),
+        "last_error": error,
+        "discovered_tools_count": previous.get(
+            "discovered_tools_count", 0
+        ),
+    }
+
+    if status == "healthy":
+        entry["last_successful_check"] = checked_at
+
+        if discovered_tools_count is not None:
+            entry["discovered_tools_count"] = (
+                discovered_tools_count
+            )
+
+    health_status[server_id] = entry
 
 
 def python_type_from_json_schema(schema: dict) -> type:
@@ -166,6 +238,7 @@ def make_handler(
     handler.__doc__ = description or (
         f"Call {upstream_tool_name} on {server_name}"
     )
+
     return handler
 
 
@@ -234,17 +307,18 @@ def remove_tool(gateway_name: str) -> None:
     manager = mcp._tool_manager
     manager._tools.pop(gateway_name, None)
     registered_tools.pop(gateway_name, None)
+
     print(f"Removed {gateway_name}")
 
 
 async def sync_tools() -> None:
     """
-    Synchronize tools from all enabled MCP servers.
+    Synchronize tools and monitor upstream MCP server health.
 
-    Important:
-    - Temporary discovery failures preserve existing tools.
-    - Disabled or deleted servers have their tools removed.
-    - Successful discovery removes tools absent from the new tool list.
+    Temporary discovery failures preserve existing tools.
+    Disabled or deleted servers have their tools removed.
+    Successful discovery removes tools absent from the new list.
+    Health information is saved in data/health.json.
     """
     try:
         servers = read_registry()
@@ -255,13 +329,37 @@ async def sync_tools() -> None:
     enabled_servers = {
         server["id"]: server
         for server in servers
-        if server.get("enabled", False)
+        if server.get("enabled", False) and server.get("id")
     }
+
+    health_status = read_health_status()
+
+    current_server_ids = {
+        server["id"]
+        for server in servers
+        if server.get("id")
+    }
+
+    # Remove health records for servers deleted from the registry.
+    for server_id in list(health_status):
+        if server_id not in current_server_ids:
+            del health_status[server_id]
+
+    # Disabled servers should not be reported as unhealthy.
+    for server in servers:
+        if not server.get("enabled", False):
+            if server.get("id"):
+                update_server_health(
+                    health_status,
+                    server,
+                    status="disabled",
+                    error=None,
+                )
 
     desired_tools: dict[str, tuple[dict, Any]] = {}
     successfully_discovered_ids: set[str] = set()
 
-    # Discover each server independently.
+    # Discover and check each enabled server independently.
     for server in servers:
         if not server.get("enabled", False):
             continue
@@ -270,15 +368,24 @@ async def sync_tools() -> None:
         server_id = server.get("id")
 
         if not server_id:
-            print(f"Skipping registry entry without an ID: {server_name}")
+            print(
+                f"Skipping registry entry without an ID: "
+                f"{server_name}"
+            )
             continue
 
         try:
             tools = await fetch_tools(server)
 
-            # A successful response is authoritative, even if it contains
-            # zero tools.
             successfully_discovered_ids.add(server_id)
+
+            update_server_health(
+                health_status,
+                server,
+                status="healthy",
+                error=None,
+                discovered_tools_count=len(tools),
+            )
 
             for tool in tools:
                 gateway_name = f"{server_name}__{tool.name}"
@@ -289,24 +396,30 @@ async def sync_tools() -> None:
             )
 
         except Exception as exc:
-            # Do not treat a connection failure as tool deletion.
-            print(
-                f"Could not discover tools from {server_name}; "
-                f"preserving existing tools: {exc}"
+            update_server_health(
+                health_status,
+                server,
+                status="unhealthy",
+                error=str(exc),
             )
 
-    # Remove tools only when justified by registry state or successful
-    # discovery. A failed upstream discovery preserves existing tools.
+            print(
+                f"Health check failed for {server_name}; "
+                f"preserving previously registered tools: {exc}"
+            )
+
+    # Remove tools only when justified by registry state or
+    # successful discovery. A failed discovery preserves tools.
     for name, existing in list(registered_tools.items()):
         server_id = existing["server_id"]
         current_server = enabled_servers.get(server_id)
 
-        # Server disabled or removed from the registry.
+        # Server disabled or removed.
         if current_server is None:
             remove_tool(name)
             continue
 
-        # The server's name or URL changed.
+        # Server name or URL changed.
         if (
             existing["server_name"] != current_server["name"]
             or existing["url"] != current_server["url"]
@@ -314,18 +427,17 @@ async def sync_tools() -> None:
             remove_tool(name)
             continue
 
-        # This server failed discovery. Keep its previously registered tools.
+        # Temporary discovery failure: preserve existing tools.
         if server_id not in successfully_discovered_ids:
             continue
 
-        # Discovery succeeded: a missing tool can now be removed.
+        # Successful discovery is authoritative.
         if name not in desired_tools:
             remove_tool(name)
             continue
 
         desired_server, desired_tool = desired_tools[name]
 
-        # Check whether the upstream tool identity changed.
         if (
             existing["server_id"] != desired_server["id"]
             or existing["url"] != desired_server["url"]
@@ -333,7 +445,7 @@ async def sync_tools() -> None:
         ):
             remove_tool(name)
 
-    # Register tools discovered for the first time or tools that were removed.
+    # Register newly discovered tools.
     for name, (server, tool) in desired_tools.items():
         if name not in registered_tools:
             try:
@@ -341,17 +453,26 @@ async def sync_tools() -> None:
             except Exception as exc:
                 print(f"Could not register {name}: {exc}")
 
+    try:
+        write_health_status(health_status)
+    except Exception as exc:
+        print(f"Could not save health status: {exc}")
+
 
 async def refresh_loop():
-    """Refresh tool discovery periodically."""
+    """Refresh discovery and health information periodically."""
     while True:
         await asyncio.sleep(REFRESH_INTERVAL)
-        await sync_tools()
+
+        try:
+            await sync_tools()
+        except Exception as exc:
+            print(f"Gateway refresh failed: {exc}")
 
 
 @asynccontextmanager
 async def gateway_lifespan():
-    """Initialize tool discovery and start the refresh loop."""
+    """Initialize discovery and start the refresh loop."""
     await sync_tools()
     refresh_task = asyncio.create_task(refresh_loop())
 
