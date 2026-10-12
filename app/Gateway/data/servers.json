@@ -1,0 +1,11 @@
+[
+  {
+    "id": "ea43abcf-6a21-4895-a4cd-7691e8bd556a",
+    "name": "woocommerce",
+    "url": "http://127.0.0.1:8001/mcp",
+    "description": "WooCommerce MCP server running in Kubernetes",
+    "enabled": true,
+    "created_at": "2026-10-12T07:11:18.836269+00:00",
+    "updated_at": "2026-10-12T07:13:01.854551+00:00"
+  }
+]
