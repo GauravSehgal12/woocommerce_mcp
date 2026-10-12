@@ -35,6 +35,7 @@ registered_tools: dict[str, dict[str, str]] = {}
 
 
 def read_registry() -> list[dict]:
+    """Read and validate the MCP server registry."""
     if not REGISTRY_FILE.exists():
         return []
 
@@ -48,6 +49,7 @@ def read_registry() -> list[dict]:
 
 
 def python_type_from_json_schema(schema: dict) -> type:
+    """Convert a JSON Schema type to a Python type."""
     schema_type = schema.get("type")
 
     if isinstance(schema_type, list):
@@ -69,6 +71,7 @@ def python_type_from_json_schema(schema: dict) -> type:
 
 
 async def fetch_tools(server: dict) -> list:
+    """Discover tools exposed by an upstream MCP server."""
     async with streamablehttp_client(server["url"]) as (
         read_stream,
         write_stream,
@@ -87,6 +90,8 @@ def make_handler(
     upstream_tool_name: str,
     description: str,
 ):
+    """Create a gateway tool handler that forwards calls upstream."""
+
     async def handler(**kwargs):
         # Check the current registry before every tool call.
         try:
@@ -99,7 +104,8 @@ def make_handler(
 
         server = next(
             (
-                item for item in current_servers
+                item
+                for item in current_servers
                 if item.get("id") == server_id
             ),
             None,
@@ -108,13 +114,19 @@ def make_handler(
         if not server or not server.get("enabled", False):
             return {
                 "is_error": True,
-                "error": f"MCP server '{server_name}' is disabled or removed.",
+                "error": (
+                    f"MCP server '{server_name}' "
+                    "is disabled or removed."
+                ),
             }
 
         if server.get("url") != server_url:
             return {
                 "is_error": True,
-                "error": "The server URL changed. Refresh tool discovery.",
+                "error": (
+                    "The server URL changed. "
+                    "Refresh tool discovery."
+                ),
             }
 
         try:
@@ -158,6 +170,7 @@ def make_handler(
 
 
 def register_tool(server: dict, tool) -> None:
+    """Register one upstream tool with the gateway."""
     server_name = server["name"]
     upstream_name = tool.name
     gateway_name = f"{server_name}__{upstream_name}"
@@ -217,8 +230,7 @@ def register_tool(server: dict, tool) -> None:
 
 
 def remove_tool(gateway_name: str) -> None:
-    # FastMCP's current tool manager stores registered tools by name.
-    # Remove only tools managed by this gateway's registry sync.
+    """Remove a tool managed by the registry synchronizer."""
     manager = mcp._tool_manager
     manager._tools.pop(gateway_name, None)
     registered_tools.pop(gateway_name, None)
@@ -226,42 +238,94 @@ def remove_tool(gateway_name: str) -> None:
 
 
 async def sync_tools() -> None:
+    """
+    Synchronize tools from all enabled MCP servers.
+
+    Important:
+    - Temporary discovery failures preserve existing tools.
+    - Disabled or deleted servers have their tools removed.
+    - Successful discovery removes tools absent from the new tool list.
+    """
     try:
         servers = read_registry()
     except Exception as exc:
         print(f"Registry read failed: {exc}")
         return
 
-    desired_tools: dict[str, tuple[dict, Any]] = {}
+    enabled_servers = {
+        server["id"]: server
+        for server in servers
+        if server.get("enabled", False)
+    }
 
+    desired_tools: dict[str, tuple[dict, Any]] = {}
+    successfully_discovered_ids: set[str] = set()
+
+    # Discover each server independently.
     for server in servers:
         if not server.get("enabled", False):
+            continue
+
+        server_name = server.get("name", "unknown")
+        server_id = server.get("id")
+
+        if not server_id:
+            print(f"Skipping registry entry without an ID: {server_name}")
             continue
 
         try:
             tools = await fetch_tools(server)
 
-            for tool in tools:
-                name = f"{server['name']}__{tool.name}"
-                desired_tools[name] = (server, tool)
+            # A successful response is authoritative, even if it contains
+            # zero tools.
+            successfully_discovered_ids.add(server_id)
 
-        except Exception as exc:
-            # One unavailable server must not block other servers.
+            for tool in tools:
+                gateway_name = f"{server_name}__{tool.name}"
+                desired_tools[gateway_name] = (server, tool)
+
             print(
-                f"Could not discover tools from "
-                f"{server.get('name', 'unknown')}: {exc}"
+                f"Discovered {len(tools)} tools from {server_name}"
             )
 
-    # Remove tools no longer present or whose upstream configuration changed.
-    for name, existing in list(registered_tools.items()):
-        desired = desired_tools.get(name)
+        except Exception as exc:
+            # Do not treat a connection failure as tool deletion.
+            print(
+                f"Could not discover tools from {server_name}; "
+                f"preserving existing tools: {exc}"
+            )
 
-        if desired is None:
+    # Remove tools only when justified by registry state or successful
+    # discovery. A failed upstream discovery preserves existing tools.
+    for name, existing in list(registered_tools.items()):
+        server_id = existing["server_id"]
+        current_server = enabled_servers.get(server_id)
+
+        # Server disabled or removed from the registry.
+        if current_server is None:
             remove_tool(name)
             continue
 
-        desired_server, desired_tool = desired
+        # The server's name or URL changed.
+        if (
+            existing["server_name"] != current_server["name"]
+            or existing["url"] != current_server["url"]
+        ):
+            remove_tool(name)
+            continue
 
+        # This server failed discovery. Keep its previously registered tools.
+        if server_id not in successfully_discovered_ids:
+            continue
+
+        # Discovery succeeded: a missing tool can now be removed.
+        if name not in desired_tools:
+            remove_tool(name)
+            continue
+
+        desired_server, desired_tool = desired_tools[name]
+
+        # Check whether the upstream tool identity changed.
         if (
             existing["server_id"] != desired_server["id"]
             or existing["url"] != desired_server["url"]
@@ -269,7 +333,7 @@ async def sync_tools() -> None:
         ):
             remove_tool(name)
 
-    # Add newly discovered tools.
+    # Register tools discovered for the first time or tools that were removed.
     for name, (server, tool) in desired_tools.items():
         if name not in registered_tools:
             try:
@@ -279,6 +343,7 @@ async def sync_tools() -> None:
 
 
 async def refresh_loop():
+    """Refresh tool discovery periodically."""
     while True:
         await asyncio.sleep(REFRESH_INTERVAL)
         await sync_tools()
@@ -286,6 +351,7 @@ async def refresh_loop():
 
 @asynccontextmanager
 async def gateway_lifespan():
+    """Initialize tool discovery and start the refresh loop."""
     await sync_tools()
     refresh_task = asyncio.create_task(refresh_loop())
 
@@ -293,6 +359,7 @@ async def gateway_lifespan():
         yield {}
     finally:
         refresh_task.cancel()
+
         try:
             await refresh_task
         except asyncio.CancelledError:
