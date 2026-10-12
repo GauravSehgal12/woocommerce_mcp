@@ -1,8 +1,10 @@
 
 import asyncio
 import inspect
+import json
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Annotated, cast
 
 from dotenv import load_dotenv
@@ -13,15 +15,14 @@ from mcp.client.streamable_http import streamablehttp_client
 from mcp.server.fastmcp import FastMCP
 
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(BASE_DIR, ".env"))
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
 
-WOOCOMMERCE_MCP_URL = os.getenv(
-    "WOOCOMMERCE_MCP_URL",
-    "http://127.0.0.1:8001/mcp",
-)
+REGISTRY_FILE = BASE_DIR / "data" / "servers.json"
+
 GATEWAY_HOST = os.getenv("GATEWAY_HOST", "127.0.0.1")
 GATEWAY_PORT = int(os.getenv("GATEWAY_PORT", "8100"))
+REFRESH_INTERVAL = 5
 
 mcp = FastMCP(
     "woo-mcp-gateway",
@@ -29,8 +30,24 @@ mcp = FastMCP(
     port=GATEWAY_PORT,
 )
 
+# Maps gateway tool names to their upstream server details.
+registered_tools: dict[str, dict[str, str]] = {}
 
-def python_type_from_json_schema(schema: dict) -> type[Any]:
+
+def read_registry() -> list[dict]:
+    if not REGISTRY_FILE.exists():
+        return []
+
+    with REGISTRY_FILE.open("r", encoding="utf-8") as file:
+        data = json.load(file)
+
+    if not isinstance(data, list):
+        raise ValueError("Server registry must be a JSON list.")
+
+    return data
+
+
+def python_type_from_json_schema(schema: dict) -> type:
     schema_type = schema.get("type")
 
     if isinstance(schema_type, list):
@@ -39,7 +56,7 @@ def python_type_from_json_schema(schema: dict) -> type[Any]:
             None,
         )
 
-    type_map: dict[str, type] = {
+    type_map = {
         "string": str,
         "integer": int,
         "number": float,
@@ -48,124 +65,238 @@ def python_type_from_json_schema(schema: dict) -> type[Any]:
         "object": dict,
     }
 
-    if isinstance(schema_type, str):
-        return cast(type, type_map.get(schema_type, Any))
-
-    return cast(type[Any], Any)
+    return cast(type, type_map.get(cast(str, schema_type), Any))
 
 
-async def discover_and_register_tools():
-    async with streamablehttp_client(WOOCOMMERCE_MCP_URL) as (
+async def fetch_tools(server: dict) -> list:
+    async with streamablehttp_client(server["url"]) as (
         read_stream,
         write_stream,
         _,
     ):
         async with ClientSession(read_stream, write_stream) as client:
             await client.initialize()
-            response = await client.list_tools()
+            result = await client.list_tools()
+            return result.tools
 
+
+def make_handler(
+    server_id: str,
+    server_name: str,
+    server_url: str,
+    upstream_tool_name: str,
+    description: str,
+):
+    async def handler(**kwargs):
+        # Check the current registry before every tool call.
+        try:
+            current_servers = read_registry()
+        except Exception as exc:
+            return {
+                "is_error": True,
+                "error": f"Could not read server registry: {exc}",
+            }
+
+        server = next(
+            (
+                item for item in current_servers
+                if item.get("id") == server_id
+            ),
+            None,
+        )
+
+        if not server or not server.get("enabled", False):
+            return {
+                "is_error": True,
+                "error": f"MCP server '{server_name}' is disabled or removed.",
+            }
+
+        if server.get("url") != server_url:
+            return {
+                "is_error": True,
+                "error": "The server URL changed. Refresh tool discovery.",
+            }
+
+        try:
+            async with streamablehttp_client(server_url) as (
+                read_stream,
+                write_stream,
+                _,
+            ):
+                async with ClientSession(
+                    read_stream,
+                    write_stream,
+                ) as client:
+                    await client.initialize()
+                    result = await client.call_tool(
+                        upstream_tool_name,
+                        arguments=kwargs,
+                    )
+
+            return {
+                "upstream": server_name,
+                "tool": upstream_tool_name,
+                "is_error": result.isError,
+                "content": [
+                    getattr(item, "text", str(item))
+                    for item in result.content
+                ],
+            }
+
+        except Exception as exc:
+            return {
+                "upstream": server_name,
+                "tool": upstream_tool_name,
+                "is_error": True,
+                "error": str(exc),
+            }
+
+    handler.__doc__ = description or (
+        f"Call {upstream_tool_name} on {server_name}"
+    )
+    return handler
+
+
+def register_tool(server: dict, tool) -> None:
+    server_name = server["name"]
+    upstream_name = tool.name
+    gateway_name = f"{server_name}__{upstream_name}"
+
+    input_schema = tool.inputSchema or {}
+    properties = input_schema.get("properties", {})
+    required = set(input_schema.get("required", []))
+
+    parameters = []
+
+    for field_name, field_schema in properties.items():
+        field_type = python_type_from_json_schema(field_schema)
+        description = field_schema.get("description")
+
+        if description:
+            field_type = Annotated[
+                field_type,
+                Field(description=description),
+            ]
+
+        default = (
+            inspect.Parameter.empty
+            if field_name in required
+            else field_schema.get("default", None)
+        )
+
+        parameters.append(
+            inspect.Parameter(
+                field_name,
+                inspect.Parameter.KEYWORD_ONLY,
+                default=default,
+                annotation=field_type,
+            )
+        )
+
+    handler = make_handler(
+        server["id"],
+        server_name,
+        server["url"],
+        upstream_name,
+        tool.description or "",
+    )
+
+    handler.__name__ = gateway_name
+    handler.__signature__ = inspect.Signature(parameters)
+
+    mcp.tool(name=gateway_name)(handler)
+
+    registered_tools[gateway_name] = {
+        "server_id": server["id"],
+        "server_name": server_name,
+        "url": server["url"],
+        "upstream_tool": upstream_name,
+    }
+
+    print(f"Registered {gateway_name}")
+
+
+def remove_tool(gateway_name: str) -> None:
+    # FastMCP's current tool manager stores registered tools by name.
+    # Remove only tools managed by this gateway's registry sync.
+    manager = mcp._tool_manager
+    manager._tools.pop(gateway_name, None)
+    registered_tools.pop(gateway_name, None)
+    print(f"Removed {gateway_name}")
+
+
+async def sync_tools() -> None:
+    try:
+        servers = read_registry()
+    except Exception as exc:
+        print(f"Registry read failed: {exc}")
+        return
+
+    desired_tools: dict[str, tuple[dict, Any]] = {}
+
+    for server in servers:
+        if not server.get("enabled", False):
+            continue
+
+        try:
+            tools = await fetch_tools(server)
+
+            for tool in tools:
+                name = f"{server['name']}__{tool.name}"
+                desired_tools[name] = (server, tool)
+
+        except Exception as exc:
+            # One unavailable server must not block other servers.
             print(
-                f"Connected to WooCommerce MCP: "
-                f"{len(response.tools)} tools discovered"
+                f"Could not discover tools from "
+                f"{server.get('name', 'unknown')}: {exc}"
             )
 
-            for tool in response.tools:
-                input_schema = tool.inputSchema or {}
-                properties = input_schema.get("properties", {})
-                required = set(input_schema.get("required", []))
+    # Remove tools no longer present or whose upstream configuration changed.
+    for name, existing in list(registered_tools.items()):
+        desired = desired_tools.get(name)
 
-                parameters = []
+        if desired is None:
+            remove_tool(name)
+            continue
 
-                for field_name, field_schema in properties.items():
-                    field_type = python_type_from_json_schema(
-                        field_schema
-                    )
+        desired_server, desired_tool = desired
 
-                    description = field_schema.get("description")
+        if (
+            existing["server_id"] != desired_server["id"]
+            or existing["url"] != desired_server["url"]
+            or existing["upstream_tool"] != desired_tool.name
+        ):
+            remove_tool(name)
 
-                    if description:
-                        field_type = Annotated[
-                            field_type,
-                            Field(description=description),
-                        ]
+    # Add newly discovered tools.
+    for name, (server, tool) in desired_tools.items():
+        if name not in registered_tools:
+            try:
+                register_tool(server, tool)
+            except Exception as exc:
+                print(f"Could not register {name}: {exc}")
 
-                    if field_name in required:
-                        default = inspect.Parameter.empty
-                    else:
-                        default = field_schema.get("default", None)
 
-                    parameters.append(
-                        inspect.Parameter(
-                            field_name,
-                            inspect.Parameter.KEYWORD_ONLY,
-                            default=default,
-                            annotation=field_type,
-                        )
-                    )
-
-                signature = inspect.Signature(parameters)
-
-                def make_handler(upstream_name, tool_description):
-                    async def handler(**kwargs):
-                        try:
-                            async with streamablehttp_client(
-                                WOOCOMMERCE_MCP_URL
-                            ) as (read, write, _):
-                                async with ClientSession(
-                                    read, write
-                                ) as upstream:
-                                    await upstream.initialize()
-
-                                    result = await upstream.call_tool(
-                                        upstream_name,
-                                        arguments=kwargs,
-                                    )
-
-                            content = [
-                                getattr(item, "text", str(item))
-                                for item in result.content
-                            ]
-
-                            return {
-                                "upstream": "woocommerce",
-                                "tool": upstream_name,
-                                "is_error": result.isError,
-                                "content": content,
-                            }
-
-                        except Exception as exc:
-                            return {
-                                "upstream": "woocommerce",
-                                "tool": upstream_name,
-                                "is_error": True,
-                                "error": str(exc),
-                            }
-
-                    handler.__doc__ = tool_description or (
-                        f"Call the WooCommerce tool {upstream_name}"
-                    )
-                    return handler
-
-                handler = make_handler(
-                    tool.name,
-                    tool.description,
-                )
-
-                handler.__name__ = f"woocommerce__{tool.name}"
-                handler.__signature__ = signature
-
-                mcp.tool(name=f"woocommerce__{tool.name}")(handler)
-
-                print(
-                    f"Registered woocommerce__{tool.name}: "
-                    f"{list(properties.keys())}"
-                )
+async def refresh_loop():
+    while True:
+        await asyncio.sleep(REFRESH_INTERVAL)
+        await sync_tools()
 
 
 @asynccontextmanager
 async def gateway_lifespan():
-    await discover_and_register_tools()
-    yield {}
+    await sync_tools()
+    refresh_task = asyncio.create_task(refresh_loop())
+
+    try:
+        yield {}
+    finally:
+        refresh_task.cancel()
+        try:
+            await refresh_task
+        except asyncio.CancelledError:
+            pass
 
 
 async def main():
