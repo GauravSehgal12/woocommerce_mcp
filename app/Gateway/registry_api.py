@@ -22,6 +22,8 @@ try:
     from .security import (
         create_user,
         get_current_user,
+        get_db,
+        get_db,
         issue_api_key,
         list_users,
         list_user_keys,
@@ -464,3 +466,54 @@ def api_revoke_key(
         )
 
     return {"message": "API key revoked."}
+
+
+# ---------------------------------------------------------
+# Audit logs - admin only
+# ---------------------------------------------------------
+
+@app.get("/audit-logs")
+def list_audit_logs(
+    limit: int = 50,
+    offset: int = 0,
+    outcome: str | None = None,
+    username: str | None = None,
+    server_name: str | None = None,
+    admin: dict = Depends(require_role("admin")),
+):
+    """Return a paginated, filterable view of tool-call audit events."""
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=400, detail="Limit must be between 1 and 100.")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="Offset must be zero or greater.")
+    if outcome and outcome not in {"success", "error", "denied"}:
+        raise HTTPException(status_code=400, detail="Outcome must be success, error, or denied.")
+
+    clauses = []
+    params = []
+    if outcome:
+        clauses.append("outcome = ?")
+        params.append(outcome)
+    if username and username.strip():
+        clauses.append("username LIKE ?")
+        params.append(f"%{username.strip()[:80]}%")
+    if server_name and server_name.strip():
+        clauses.append("server_name LIKE ?")
+        params.append(f"%{server_name.strip()[:80]}%")
+
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with get_db() as db:
+        total = db.execute(f"SELECT COUNT(*) FROM audit_logs {where_sql}", params).fetchone()[0]
+        rows = db.execute(
+            f"""
+            SELECT id, user_id, username, server_name, tool_name,
+                   timestamp, duration_ms, outcome, details
+            FROM audit_logs
+            {where_sql}
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+            """,
+            [*params, limit, offset],
+        ).fetchall()
+
+    return {"count": len(rows), "total": total, "limit": limit, "offset": offset, "logs": [dict(row) for row in rows]}
