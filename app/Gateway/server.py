@@ -54,6 +54,45 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def summarize_exception(exc: BaseException) -> str:
+    """Return a useful, sanitized audit message for a failed tool call."""
+    exceptions = []
+
+    def collect(error: BaseException) -> None:
+        if isinstance(error, BaseExceptionGroup):
+            for child in error.exceptions:
+                collect(child)
+        else:
+            exceptions.append(error)
+
+    collect(exc)
+
+    # Prefer specific, actionable causes over the outer ExceptionGroup.
+    if any(isinstance(e, (TimeoutError, asyncio.TimeoutError))
+           for e in exceptions):
+        return "Tool execution timed out"
+
+    if any(isinstance(e, ConnectionRefusedError) for e in exceptions):
+        return "MCP server unavailable: connection refused"
+
+    if any(
+        isinstance(e, OSError) and getattr(e, "errno", None) in (111, 10061)
+        for e in exceptions
+    ):
+        return "MCP server unavailable: connection failed"
+
+    if any(isinstance(e, ConnectionError) for e in exceptions):
+        return "MCP server connection failed"
+
+    if any(type(e).__name__ == "ValidationError" for e in exceptions):
+        return "Tool argument validation failed"
+
+    if any(type(e).__name__ == "CancelledError" for e in exceptions):
+        return "Tool execution cancelled"
+
+    # Never store arbitrary exception messages, which may contain secrets.
+    return f"Tool execution failed ({type(exc).__name__})"
+
 def read_health_status() -> dict:
     if not HEALTH_FILE.exists():
         return {}
@@ -183,15 +222,18 @@ def make_handler(
                     getattr(item, "text", str(item)) for item in result.content
                 ],
             }
+        
         except Exception as exc:
             outcome = "error"
-            details = type(exc).__name__
+            details = summarize_exception(exc)
             return {
-                "upstream": server_name,
-                "tool": upstream_tool_name,
-                "is_error": True,
-                "error": "Upstream tool call failed.",
+            "upstream": server_name,
+            "tool": upstream_tool_name,
+            "is_error": True,
+            "error": "Upstream tool call failed.",
             }
+
+        
         finally:
             duration_ms = int((time.perf_counter() - started) * 1000)
             try:

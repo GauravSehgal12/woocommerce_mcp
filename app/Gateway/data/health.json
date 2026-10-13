@@ -4,8 +4,8 @@
     "name": "woocommerce",
     "url": "http://127.0.0.1:8001/mcp",
     "status": "healthy",
-    "last_checked": "2026-10-13T08:40:03.519129+00:00",
-    "last_successful_check": "2026-10-13T08:40:03.519129+00:00",
+    "last_checked": "2026-10-13T09:18:55.800883+00:00",
+    "last_successful_check": "2026-10-13T09:18:55.800883+00:00",
     "last_error": null,
     "discovered_tools_count": 6
   },
@@ -13,10 +13,10 @@
     "server_id": "a3fd5e3a-2643-444e-80bb-e09d7d635c79",
     "name": "inventory",
     "url": "http://127.0.0.1:8200/mcp",
-    "status": "healthy",
-    "last_checked": "2026-10-13T08:40:04.013953+00:00",
-    "last_successful_check": "2026-10-13T08:40:04.013953+00:00",
-    "last_error": null,
+    "status": "unhealthy",
+    "last_checked": "2026-10-13T09:18:58.254445+00:00",
+    "last_successful_check": "2026-10-13T09:08:57.366208+00:00",
+    "last_error": "ExceptionGroup",
     "discovered_tools_count": 2
   }
 }
