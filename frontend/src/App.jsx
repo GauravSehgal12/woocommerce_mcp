@@ -3,36 +3,37 @@
 import { useCallback, useEffect, useState } from "react";
 
 
-<import className="meta env"></import>
 import {
 
-  Activity,
+  Activity,
 
-  AlertCircle,
+  AlertCircle,
 
-  CheckCircle2,
+  CheckCircle2,
 
-  CirclePlus,
+  CirclePlus,
 
-  Clock3,
+  Clock3,
 
-  Database,
+  Database,
 
-  ExternalLink,
+  ExternalLink,
 
-  LoaderCircle,
+  LoaderCircle,
 
-  Network,
+  LogOut,
 
-  RefreshCw,
+  Network,
 
-  Server,
+  RefreshCw,
 
-  ShieldCheck,
+  Server,
 
-  Trash2,
+  ShieldCheck,
 
-  XCircle,
+  Trash2,
+
+  XCircle,
 
 } from "lucide-react";
 
@@ -44,26 +45,23 @@ import AuditLogs from "./AuditLogs";
 const API_BASE =
   import.meta.env.VITE_API_BASE || "http://127.0.0.1:8101";
 
-const API_KEY = import.meta.env.VITE_API_KEY;
-const API_HEADERS = {
-  "X-API-Key": API_KEY,
-};
+const API_OPTIONS = { credentials: "include" };
 
 
 
 function formatDate(value) {
 
-  if (!value) return "Not checked yet";
+  if (!value) return "Not checked yet";
 
 
 
-  const date = new Date(value);
+  const date = new Date(value);
 
-  return Number.isNaN(date.getTime())
+  return Number.isNaN(date.getTime())
 
-    ? value
+    ? value
 
-    : date.toLocaleString();
+    : date.toLocaleString();
 
 }
 
@@ -71,21 +69,21 @@ function formatDate(value) {
 
 function StatusBadge({ status }) {
 
-  const normalized = (status || "unknown").toLowerCase();
+  const normalized = (status || "unknown").toLowerCase();
 
 
 
-  return (
+  return (
 
-    <span className={`status-badge status-${normalized}`}>
+    <span className={`status-badge status-${normalized}`}>
 
-      <span className="status-dot" />
+      <span className="status-dot" />
 
-      {normalized}
+      {normalized}
 
-    </span>
+    </span>
 
-  );
+  );
 
 }
 
@@ -93,1088 +91,1157 @@ function StatusBadge({ status }) {
 
 function StatCard({ label, value, icon: Icon, tone }) {
 
-  return (
+  return (
 
-    <div className="stat-card">
+    <div className="stat-card">
 
-      <div className={`stat-icon ${tone}`}>
+      <div className={`stat-icon ${tone}`}>
 
-        <Icon size={21} />
+        <Icon size={21} />
 
-      </div>
+      </div>
 
-      <div>
+      <div>
 
-        <p className="stat-label">{label}</p>
+        <p className="stat-label">{label}</p>
 
-        <p className="stat-value">{value}</p>
+        <p className="stat-value">{value}</p>
 
-      </div>
+      </div>
 
-    </div>
+    </div>
 
-  );
+  );
 
 }
 
 
 
 function App() {
+  const [user, setUser] = useState(null);
+  const [authChecking, setAuthChecking] = useState(true);
+  const [loginUsername, setLoginUsername] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [loginError, setLoginError] = useState("");
 
-  const [servers, setServers] = useState([]);
+  const [servers, setServers] = useState([]);
 
-  const [health, setHealth] = useState([]);
+  const [health, setHealth] = useState([]);
 
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(true);
 
-  const [refreshing, setRefreshing] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
-  const [error, setError] = useState("");
+  const [error, setError] = useState("");
 
-  const [actionMessage, setActionMessage] = useState("");
+  const [actionMessage, setActionMessage] = useState("");
 
-  const [busyId, setBusyId] = useState("");
+  const [busyId, setBusyId] = useState("");
 
-  const [showForm, setShowForm] = useState(false);
+  const [showForm, setShowForm] = useState(false);
 
   const [activePage, setActivePage] = useState("overview");
 
 
 
-  const [form, setForm] = useState({
+  const [form, setForm] = useState({
 
-    name: "",
+    name: "",
 
-    url: "",
+    url: "",
 
-    description: "",
+    description: "",
 
-  });
-
-
-
-  const loadDashboard = useCallback(async (showSpinner = false) => {
-
-    if (showSpinner) setRefreshing(true);
+  });
 
 
 
-    try {
+  const loadDashboard = useCallback(async (showSpinner = false) => {
 
-      const [serversResponse, healthResponse] = await Promise.all([
+    if (showSpinner) setRefreshing(true);
 
-        fetch(`${API_BASE}/servers`, {
-          headers: API_HEADERS,
+
+
+    try {
+
+      const [serversResponse, healthResponse] = await Promise.all([
+
+        fetch(`${API_BASE}/servers`, API_OPTIONS),
+        fetch(`${API_BASE}/servers/health`, API_OPTIONS),
+
+      ]);
+
+
+
+      if (serversResponse.status === 401 || healthResponse.status === 401) {
+        setUser(null);
+        setServers([]);
+        setHealth([]);
+        return;
+      }
+      if (!serversResponse.ok || !healthResponse.ok) {
+        throw new Error("The Registry API returned an error.");
+      }
+
+
+
+      const serversData = await serversResponse.json();
+
+      const healthData = await healthResponse.json();
+
+
+
+      setServers(serversData.servers || []);
+
+      setHealth(healthData.servers || []);
+
+      setError("");
+
+    } catch (err) {
+
+      setError(
+
+        `Cannot connect to the Registry API. ${err.message} ` +
+
+        "Check that the API is running on port 8101."
+
+      );
+
+    } finally {
+
+      setLoading(false);
+
+      setRefreshing(false);
+
+    }
+
+  }, []);
+
+
+
+  useEffect(() => {
+    let cancelled = false;
+    async function restoreSession() {
+      try {
+        const response = await fetch(`${API_BASE}/auth/me`, API_OPTIONS);
+        if (!response.ok) return;
+        const data = await response.json();
+        if (!cancelled) setUser(data.user || data);
+      } catch {
+        if (!cancelled) setLoginError("Cannot reach the Registry API. Check that it is running on port 8101.");
+      } finally {
+        if (!cancelled) setAuthChecking(false);
+      }
+    }
+    restoreSession();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    loadDashboard();
+    const timer = setInterval(() => loadDashboard(), 5000);
+    return () => clearInterval(timer);
+  }, [loadDashboard, user]);
+
+  async function handleLogin(event) {
+    event.preventDefault();
+    setLoginBusy(true);
+    setLoginError("");
+    try {
+      const response = await fetch(`${API_BASE}/auth/login`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: loginUsername.trim(), password: loginPassword }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || "Login failed. Check your username and password.");
+      const meResponse = await fetch(`${API_BASE}/auth/me`, API_OPTIONS);
+      if (!meResponse.ok) throw new Error("Login succeeded, but the session could not be verified.");
+      const me = await meResponse.json();
+      setUser(me.user || me || data.user || data);
+      setLoginPassword("");
+      setError("");
+    } catch (err) {
+      setLoginError(err.message || "Could not sign in.");
+    } finally {
+      setLoginBusy(false);
+    }
+  }
+
+  async function handleLogout() {
+    try {
+      await fetch(`${API_BASE}/auth/logout`, { method: "POST", ...API_OPTIONS });
+    } finally {
+      setUser(null);
+      setServers([]);
+      setHealth([]);
+      setShowForm(false);
+      setActivePage("overview");
+    }
+  }
+
+
+  const healthById = Object.fromEntries(
+
+    health.map((item) => [item.server_id, item])
+
+  );
+
+
+
+  const healthyCount = servers.filter(
+
+    (server) =>
+
+      server.enabled &&
+
+      healthById[server.id]?.status === "healthy"
+
+  ).length;
+
+
+
+  const unhealthyCount = servers.filter(
+
+    (server) =>
+
+      server.enabled &&
+
+      healthById[server.id]?.status === "unhealthy"
+
+  ).length;
+
+
+
+  const totalTools = servers.reduce((total, server) => {
+
+    if (!server.enabled) return total;
+
+
+
+    return total + (
+
+      healthById[server.id]?.discovered_tools_count || 0
+
+    );
+
+  }, 0);
+
+
+
+  async function performAction(server, action) {
+
+    const labels = {
+
+      enable: "enabled",
+
+      disable: "disabled",
+
+      delete: "removed",
+
+    };
+
+
+
+    const confirmed =
+
+      action !== "delete" ||
+
+      window.confirm(
+
+        `Remove "${server.name}" from the registry?`
+
+      );
+
+
+
+    if (!confirmed) return;
+
+
+
+    setBusyId(server.id);
+
+    setActionMessage("");
+
+    setError("");
+
+
+
+    try {
+
+      const response = await fetch(
+
+        `${API_BASE}/servers/${server.id}` +
+
+          (action === "delete" ? "" : `/${action}`),
+
+        {
+          ...API_OPTIONS,
+          method: action === "delete" ? "DELETE" : "PATCH",
+        }
+
+      );
+
+
+
+      const result = await response.json();
+
+
+
+      if (!response.ok) {
+
+        throw new Error(
+
+          result.detail || "The operation failed."
+
+        );
+
+      }
+
+
+
+      setActionMessage(
+
+        `${server.name} ${labels[action]} successfully.`
+
+      );
+
+
+
+      await loadDashboard();
+
+    } catch (err) {
+
+      setError(err.message);
+
+    } finally {
+
+      setBusyId("");
+
+    }
+
+  }
+
+
+
+  async function addServer(event) {
+
+    event.preventDefault();
+
+    setBusyId("new");
+
+    setError("");
+
+    setActionMessage("");
+
+
+
+    try {
+
+      const response = await fetch(`${API_BASE}/servers`, {
+
+        method: "POST",
+
+        ...API_OPTIONS,
+        headers: { "Content-Type": "application/json" },
+
+        body: JSON.stringify({
+
+          name: form.name.trim(),
+
+          url: form.url.trim(),
+
+          description: form.description.trim(),
+
         }),
 
-        fetch(`${API_BASE}/servers/health`, {
-          headers: API_HEADERS,
-        }),
+      });
 
-      ]);
 
 
+      const result = await response.json();
 
-      if (!serversResponse.ok || !healthResponse.ok) {
 
-        throw new Error("The Registry API returned an error.");
 
-      }
+      if (!response.ok) {
 
+        throw new Error(
 
+          result.detail || "Could not register the server."
 
-      const serversData = await serversResponse.json();
+        );
 
-      const healthData = await healthResponse.json();
+      }
 
 
 
-      setServers(serversData.servers || []);
+      setForm({ name: "", url: "", description: "" });
 
-      setHealth(healthData.servers || []);
+      setShowForm(false);
 
-      setError("");
+      setActionMessage(
 
-    } catch (err) {
+        `${result.server.name} registered successfully.`
 
-      setError(
+      );
 
-        `Cannot connect to the Registry API. ${err.message} ` +
 
-        "Check that the API is running on port 8101."
 
-      );
+      await loadDashboard();
 
-    } finally {
+    } catch (err) {
 
-      setLoading(false);
+      setError(err.message);
 
-      setRefreshing(false);
+    } finally {
 
-    }
+      setBusyId("");
 
-  }, []);
+    }
 
+  }
 
 
-  useEffect(() => {
 
-    loadDashboard();
+  if (authChecking) {
+    return (
+      <div className="app-shell" style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 24 }}>
+        <main className="main-content" style={{ width: "100%", maxWidth: 440 }}>
+          <section className="panel empty-state"><LoaderCircle className="spin" size={28} /><p>Checking your session...</p></section>
+        </main>
+      </div>
+    );
+  }
 
+  if (!user) {
+    return (
+      <div className="app-shell" style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 24 }}>
+        <main className="main-content" style={{ width: "100%", maxWidth: 440 }}>
+          <section className="panel" style={{ padding: 32 }}>
+            <div className="brand" style={{ marginBottom: 24 }}>
+              <div className="brand-icon"><Network size={23} /></div>
+              <div><h2>MCP Console</h2><span>Sign in to manage your gateway</span></div>
+            </div>
+            <h1 style={{ marginBottom: 8 }}>Welcome back</h1>
+            <p className="page-subtitle" style={{ marginBottom: 24 }}>Use your platform account to continue.</p>
+            {loginError && <div className="notice notice-error"><AlertCircle size={18} /><span>{loginError}</span></div>}
+            <form className="server-form" onSubmit={handleLogin}>
+              <label>Username<input autoComplete="username" required value={loginUsername} onChange={(e) => setLoginUsername(e.target.value)} /></label>
+              <label>Password<input type="password" autoComplete="current-password" required value={loginPassword} onChange={(e) => setLoginPassword(e.target.value)} /></label>
+              <button className="button button-primary" disabled={loginBusy} style={{ width: "100%", justifyContent: "center" }}>{loginBusy ? <LoaderCircle size={16} className="spin" /> : null}{loginBusy ? "Signing in..." : "Sign in"}</button>
+            </form>
+          </section>
+        </main>
+      </div>
+    );
+  }
 
+  return (
 
-    const timer = setInterval(() => {
+    <div className="app-shell">
 
-      loadDashboard();
+      <aside className="sidebar">
 
-    }, 5000);
+        <div className="brand">
 
+          <div className="brand-icon">
 
+            <Network size={23} />
 
-    return () => clearInterval(timer);
+          </div>
 
-  }, [loadDashboard]);
+          <div>
 
+            <h2>MCP Console</h2>
 
+            <span>Gateway management</span>
 
-  const healthById = Object.fromEntries(
+          </div>
 
-    health.map((item) => [item.server_id, item])
+        </div>
 
-  );
 
 
+        <div className="nav-section-label">WORKSPACE</div>
 
-  const healthyCount = servers.filter(
-
-    (server) =>
-
-      server.enabled &&
-
-      healthById[server.id]?.status === "healthy"
-
-  ).length;
-
-
-
-  const unhealthyCount = servers.filter(
-
-    (server) =>
-
-      server.enabled &&
-
-      healthById[server.id]?.status === "unhealthy"
-
-  ).length;
-
-
-
-  const totalTools = servers.reduce((total, server) => {
-
-    if (!server.enabled) return total;
-
-
-
-    return total + (
-
-      healthById[server.id]?.discovered_tools_count || 0
-
-    );
-
-  }, 0);
-
-
-
-  async function performAction(server, action) {
-
-    const labels = {
-
-      enable: "enabled",
-
-      disable: "disabled",
-
-      delete: "removed",
-
-    };
-
-
-
-    const confirmed =
-
-      action !== "delete" ||
-
-      window.confirm(
-
-        `Remove "${server.name}" from the registry?`
-
-      );
-
-
-
-    if (!confirmed) return;
-
-
-
-    setBusyId(server.id);
-
-    setActionMessage("");
-
-    setError("");
-
-
-
-    try {
-
-      const response = await fetch(
-
-        `${API_BASE}/servers/${server.id}` +
-
-          (action === "delete" ? "" : `/${action}`),
-
-        {
-
-          method:
-
-            action === "delete" ? "DELETE" : "PATCH",
-
-        headers: API_HEADERS,
-        }
-
-      );
-
-
-
-      const result = await response.json();
-
-
-
-      if (!response.ok) {
-
-        throw new Error(
-
-          result.detail || "The operation failed."
-
-        );
-
-      }
-
-
-
-      setActionMessage(
-
-        `${server.name} ${labels[action]} successfully.`
-
-      );
-
-
-
-      await loadDashboard();
-
-    } catch (err) {
-
-      setError(err.message);
-
-    } finally {
-
-      setBusyId("");
-
-    }
-
-  }
-
-
-
-  async function addServer(event) {
-
-    event.preventDefault();
-
-    setBusyId("new");
-
-    setError("");
-
-    setActionMessage("");
-
-
-
-    try {
-
-      const response = await fetch(`${API_BASE}/servers`, {
-
-        method: "POST",
-
-        headers: {
-
-          ...API_HEADERS,
-          "Content-Type": "application/json",
-
-        },
-
-        body: JSON.stringify({
-
-          name: form.name.trim(),
-
-          url: form.url.trim(),
-
-          description: form.description.trim(),
-
-        }),
-
-      });
-
-
-
-      const result = await response.json();
-
-
-
-      if (!response.ok) {
-
-        throw new Error(
-
-          result.detail || "Could not register the server."
-
-        );
-
-      }
-
-
-
-      setForm({ name: "", url: "", description: "" });
-
-      setShowForm(false);
-
-      setActionMessage(
-
-        `${result.server.name} registered successfully.`
-
-      );
-
-
-
-      await loadDashboard();
-
-    } catch (err) {
-
-      setError(err.message);
-
-    } finally {
-
-      setBusyId("");
-
-    }
-
-  }
-
-
-
-  return (
-
-    <div className="app-shell">
-
-      <aside className="sidebar">
-
-        <div className="brand">
-
-          <div className="brand-icon">
-
-            <Network size={23} />
-
-          </div>
-
-          <div>
-
-            <h2>MCP Console</h2>
-
-            <span>Gateway management</span>
-
-          </div>
-
-        </div>
-
-
-
-        <div className="nav-section-label">WORKSPACE</div>
-
-        <button type="button" className={`nav-item ${activePage === "overview" ? "active" : ""}`} onClick={() => setActivePage("overview")}><Activity size={18} /><span>Overview</span></button>
-        <button type="button" className={`nav-item ${activePage === "overview" ? "active" : ""}`} onClick={() => setActivePage("overview")}><Server size={18} /><span>MCP Servers</span><span className="nav-count">{servers.length}</span></button>
+        <button type="button" className={`nav-item ${activePage === "overview" ? "active" : ""}`} onClick={() => setActivePage("overview")}><Activity size={18} /><span>Overview</span></button>
+        <button type="button" className={`nav-item ${activePage === "servers" ? "active" : ""}`} onClick={() => setActivePage("servers")}><Server size={18} /><span>MCP Servers</span><span className="nav-count">{servers.length}</span></button>
         <button type="button" className={`nav-item ${activePage === "audit" ? "active" : ""}`} onClick={() => setActivePage("audit")}><ShieldCheck size={18} /><span>Audit Logs</span></button>
 
 
 
-        <div className="sidebar-bottom">
+        <div className="sidebar-bottom">
 
-          <div className="connection-indicator">
+          <div className="connection-indicator">
 
-            <span className="connection-dot" />
+            <span className="connection-dot" />
 
-            <div>
+            <div>
 
-              <strong>Registry API</strong>
+              <strong>Registry API</strong>
 
-              <span>127.0.0.1:8101</span>
+              <span>127.0.0.1:8101</span>
 
-            </div>
+            </div>
 
-          </div>
+          </div>
 
-          <p>WooCommerce MCP Platform</p>
+          <p>WooCommerce MCP Platform</p>
 
-        </div>
+        </div>
 
-      </aside>
+      </aside>
 
 
 
-      <main className="main-content">
+      <main className="main-content">
 
-        <header className="topbar">
+        <header className="topbar">
 
-          <div>
+          <div>
 
-            <div className="breadcrumb">Workspace / {activePage === "audit" ? "Audit Logs" : "Overview"}</div>
-            <h1>{activePage === "audit" ? "Audit Logs" : "Server Dashboard"}</h1>
+            <div className="breadcrumb">Workspace / {activePage === "audit" ? "Audit Logs" : activePage === "servers" ? "MCP Servers" : "Overview"}</div>
+            <h1>{activePage === "audit" ? "Audit Logs" : activePage === "servers" ? "MCP Servers" : "Server Dashboard"}</h1>
             <p className="page-subtitle">{activePage === "audit" ? "Review authenticated tool activity and execution outcomes." : "Monitor and manage your connected MCP servers."}</p>
 
-          </div>
+          </div>
 
 
 
-          <div className="topbar-actions">
+          <div className="topbar-actions">
+            <span className="refresh-label">{user.username || user.email || "Signed in"} · {user.role || "member"}</span>
+            <button className="button button-secondary" onClick={handleLogout}><LogOut size={16} /> Sign out</button>
+            {activePage === "overview" && user?.role === "admin" && <>
 
-            {activePage === "overview" && <>
+            <span className="refresh-label">
 
-            <span className="refresh-label">
+              <span className="connection-dot" />
 
-              <span className="connection-dot" />
+              Auto-refresh: 5 seconds
 
-              Auto-refresh: 5 seconds
+            </span>
 
-            </span>
+            <button
 
-            <button
+              className="button button-secondary"
 
-              className="button button-secondary"
+              onClick={() => loadDashboard(true)}
 
-              onClick={() => loadDashboard(true)}
+              disabled={refreshing}
 
-              disabled={refreshing}
+            >
 
-            >
+              <RefreshCw
 
-              <RefreshCw
+                size={16}
 
-                size={16}
+                className={refreshing ? "spin" : ""}
 
-                className={refreshing ? "spin" : ""}
+              />
 
-              />
+              Refresh
 
-              Refresh
+            </button>
 
-            </button>
+            <button
 
-            <button
+              className="button button-primary"
 
-              className="button button-primary"
+              onClick={() => setShowForm(!showForm)}
 
-              onClick={() => setShowForm(!showForm)}
+            >
 
-            >
+              <CirclePlus size={17} />
 
-              <CirclePlus size={17} />
+              Add server
 
-              Add server
-
-            </button>
+            </button>
             </>}
 
-          </div>
+          </div>
 
-        </header>
+        </header>
 
 
 
-        {activePage === "audit" ? <AuditLogs /> : <>
+        {activePage === "audit" ? <AuditLogs /> : <>
 
         {error && (
 
-          <div className="notice notice-error">
+          <div className="notice notice-error">
 
-            <AlertCircle size={18} />
+            <AlertCircle size={18} />
 
-            <span>{error}</span>
+            <span>{error}</span>
 
-            <button onClick={() => setError("")}>Dismiss</button>
+            <button onClick={() => setError("")}>Dismiss</button>
 
-          </div>
+          </div>
 
-        )}
+        )}
 
 
 
-        {actionMessage && (
+        {actionMessage && (
 
-          <div className="notice notice-success">
+          <div className="notice notice-success">
 
-            <CheckCircle2 size={18} />
+            <CheckCircle2 size={18} />
 
-            <span>{actionMessage}</span>
+            <span>{actionMessage}</span>
 
-            <button onClick={() => setActionMessage("")}>
+            <button onClick={() => setActionMessage("")}>
 
-              Dismiss
+              Dismiss
 
-            </button>
+            </button>
 
-          </div>
+          </div>
 
-        )}
+        )}
 
 
 
-        {showForm && (
+        {showForm && user?.role === "admin" && (
 
-          <section className="panel form-panel">
+          <section className="panel form-panel">
 
-            <div className="section-heading">
+            <div className="section-heading">
 
-              <div>
+              <div>
 
-                <h2>Register an MCP server</h2>
+                <h2>Register an MCP server</h2>
 
-                <p>Add an upstream Streamable HTTP MCP endpoint.</p>
+                <p>Add an upstream Streamable HTTP MCP endpoint.</p>
 
-              </div>
+              </div>
 
-              <button
+              <button
 
-                className="icon-button"
+                className="icon-button"
 
-                onClick={() => setShowForm(false)}
+                onClick={() => setShowForm(false)}
 
-                aria-label="Close form"
+                aria-label="Close form"
 
-              >
+              >
 
-                <XCircle size={20} />
+                <XCircle size={20} />
 
-              </button>
+              </button>
 
-            </div>
+            </div>
 
 
 
-            <form onSubmit={addServer} className="server-form">
+            <form onSubmit={addServer} className="server-form">
 
-              <label>
+              <label>
 
-                Server name
+                Server name
 
-                <input
+                <input
 
-                  required
+                  required
 
-                  minLength={2}
+                  minLength={2}
 
-                  maxLength={80}
+                  maxLength={80}
 
-                  pattern="[A-Za-z0-9][A-Za-z0-9\_-]\*"
+                  pattern="[A-Za-z0-9][A-Za-z0-9\_-]\*"
 
-                  placeholder="e.g. inventory"
+                  placeholder="e.g. inventory"
 
-                  value={form.name}
+                  value={form.name}
 
-                  onChange={(e) =>
+                  onChange={(e) =>
 
-                    setForm({ ...form, name: e.target.value })
+                    setForm({ ...form, name: e.target.value })
 
-                  }
+                  }
 
-                />
+                />
 
-              </label>
+              </label>
 
 
 
-              <label>
+              <label>
 
-                MCP endpoint URL
+                MCP endpoint URL
 
-                <input
+                <input
 
-                  required
+                  required
 
-                  type="url"
+                  type="url"
 
-                  placeholder="http://127.0.0.1:8200/mcp"
+                  placeholder="http://127.0.0.1:8200/mcp"
 
-                  value={form.url}
+                  value={form.url}
 
-                  onChange={(e) =>
+                  onChange={(e) =>
 
-                    setForm({ ...form, url: e.target.value })
+                    setForm({ ...form, url: e.target.value })
 
-                  }
+                  }
 
-                />
+                />
 
-              </label>
+              </label>
 
 
 
-              <label>
+              <label>
 
-                Description
+                Description
 
-                <input
+                <input
 
-                  maxLength={500}
+                  maxLength={500}
 
-                  placeholder="Optional server description"
+                  placeholder="Optional server description"
 
-                  value={form.description}
+                  value={form.description}
 
-                  onChange={(e) =>
+                  onChange={(e) =>
 
-                    setForm({
+                    setForm({
 
-                      ...form,
+                      ...form,
 
-                      description: e.target.value,
+                      description: e.target.value,
 
-                    })
+                    })
 
-                  }
+                  }
 
-                />
+                />
 
-              </label>
+              </label>
 
 
 
-              <div className="form-actions">
+              <div className="form-actions">
 
-                <button
+                <button
 
-                  type="button"
+                  type="button"
 
-                  className="button button-secondary"
+                  className="button button-secondary"
 
-                  onClick={() => setShowForm(false)}
+                  onClick={() => setShowForm(false)}
 
-                >
+                >
 
-                  Cancel
+                  Cancel
 
-                </button>
+                </button>
 
-                <button
+                <button
 
-                  className="button button-primary"
+                  className="button button-primary"
 
-                  disabled={busyId === "new"}
+                  disabled={busyId === "new"}
 
-                >
+                >
 
-                  {busyId === "new" && (
+                  {busyId === "new" && (
 
-                    <LoaderCircle size={16} className="spin" />
+                    <LoaderCircle size={16} className="spin" />
 
-                  )}
+                  )}
 
-                  Register server
+                  Register server
 
-                </button>
+                </button>
 
-              </div>
+              </div>
 
-            </form>
+            </form>
 
-          </section>
+          </section>
 
-        )}
+        )}
 
 
 
-        <section className="stats-grid">
+        <section className="stats-grid">
 
-          <StatCard
+          <StatCard
 
-            label="Registered servers"
+            label="Registered servers"
 
-            value={servers.length}
+            value={servers.length}
 
-            icon={Database}
+            icon={Database}
 
-            tone="blue"
+            tone="blue"
 
-          />
+          />
 
-          <StatCard
+          <StatCard
 
-            label="Healthy servers"
+            label="Healthy servers"
 
-            value={healthyCount}
+            value={healthyCount}
 
-            icon={CheckCircle2}
+            icon={CheckCircle2}
 
-            tone="green"
+            tone="green"
 
-          />
+          />
 
-          <StatCard
+          <StatCard
 
-            label="Unhealthy servers"
+            label="Unhealthy servers"
 
-            value={unhealthyCount}
+            value={unhealthyCount}
 
-            icon={AlertCircle}
+            icon={AlertCircle}
 
-            tone="red"
+            tone="red"
 
-          />
+          />
 
-          <StatCard
+          <StatCard
 
-            label="Discovered tools"
+            label="Discovered tools"
 
-            value={totalTools}
+            value={totalTools}
 
-            icon={ShieldCheck}
+            icon={ShieldCheck}
 
-            tone="purple"
+            tone="purple"
 
-          />
+          />
 
-        </section>
+        </section>
 
 
 
-        <section className="panel">
+        <section className="panel">
 
-          <div className="section-heading">
+          <div className="section-heading">
 
-            <div>
+            <div>
 
-              <h2>Connected MCP servers</h2>
+              <h2>Connected MCP servers</h2>
 
-              <p>
+              <p>
 
-                Health status is based on gateway discovery checks.
+                Health status is based on gateway discovery checks.
 
-              </p>
+              </p>
 
-            </div>
+            </div>
 
-            <span className="count-pill">
+            <span className="count-pill">
 
-              {servers.length} total
+              {servers.length} total
 
-            </span>
+            </span>
 
-          </div>
+          </div>
 
 
 
-          {loading ? (
+          {loading ? (
 
-            <div className="empty-state">
+            <div className="empty-state">
 
-              <LoaderCircle className="spin" size={28} />
+              <LoaderCircle className="spin" size={28} />
 
-              <p>Loading server information...</p>
+              <p>Loading server information...</p>
 
-            </div>
+            </div>
 
-          ) : servers.length === 0 ? (
+          ) : servers.length === 0 ? (
 
-            <div className="empty-state">
+            <div className="empty-state">
 
-              <Server size={30} />
+              <Server size={30} />
 
-              <h3>No servers registered</h3>
+              <h3>No servers registered</h3>
 
-              <p>Add an MCP server to get started.</p>
+              <p>Add an MCP server to get started.</p>
 
-              <button
+              {user?.role === "admin" && <button
+                className="button button-primary"
+                onClick={() => setShowForm(true)}
+              >
+                <CirclePlus size={17} />
+                Add your first server
+              </button>}
 
-                className="button button-primary"
+            </div>
 
-                onClick={() => setShowForm(true)}
+          ) : (
 
-              >
+            <div className="server-list">
 
-                <CirclePlus size={17} />
+              {servers.map((server) => {
 
-                Add your first server
+                const record = healthById[server.id] || {};
 
-              </button>
+                const serverStatus = !server.enabled
 
-            </div>
+                  ? "disabled"
 
-          ) : (
+                  : record.status || "unknown";
 
-            <div className="server-list">
 
-              {servers.map((server) => {
 
-                const record = healthById[server.id] || {};
+                return (
 
-                const serverStatus = !server.enabled
+                  <article
 
-                  ? "disabled"
+                    className="server-card"
 
-                  : record.status || "unknown";
+                    key={server.id}
 
+                  >
 
+                    <div className="server-card-top">
 
-                return (
+                      <div className="server-identity">
 
-                  <article
+                        <div className="server-icon">
 
-                    className="server-card"
+                          <Server size={21} />
 
-                    key={server.id}
+                        </div>
 
-                  >
+                        <div>
 
-                    <div className="server-card-top">
+                          <div className="server-title-row">
 
-                      <div className="server-identity">
+                            <h3>{server.name}</h3>
 
-                        <div className="server-icon">
+                            <StatusBadge status={serverStatus} />
 
-                          <Server size={21} />
+                          </div>
 
-                        </div>
+                          <p className="server-description">
 
-                        <div>
+                            {server.description ||
 
-                          <div className="server-title-row">
+                              "No description provided"}
 
-                            <h3>{server.name}</h3>
+                          </p>
 
-                            <StatusBadge status={serverStatus} />
+                        </div>
 
-                          </div>
+                      </div>
 
-                          <p className="server-description">
 
-                            {server.description ||
 
-                              "No description provided"}
+                      {user?.role === "admin" && <div className="server-actions">
 
-                          </p>
+                        <button
 
-                        </div>
+                          className="button button-secondary button-small"
 
-                      </div>
+                          onClick={() =>
 
+                            performAction(
 
+                              server,
 
-                      <div className="server-actions">
+                              server.enabled ? "disable" : "enable"
 
-                        <button
+                            )
 
-                          className="button button-secondary button-small"
+                          }
 
-                          onClick={() =>
+                          disabled={busyId === server.id}
 
-                            performAction(
+                        >
 
-                              server,
+                          {busyId === server.id ? (
 
-                              server.enabled ? "disable" : "enable"
+                            <LoaderCircle
 
-                            )
+                              size={15}
 
-                          }
+                              className="spin"
 
-                          disabled={busyId === server.id}
+                            />
 
-                        >
+                          ) : server.enabled ? (
 
-                          {busyId === server.id ? (
+                            <XCircle size={15} />
 
-                            <LoaderCircle
+                          ) : (
 
-                              size={15}
+                            <CheckCircle2 size={15} />
 
-                              className="spin"
+                          )}
 
-                            />
+                          {server.enabled ? "Disable" : "Enable"}
 
-                          ) : server.enabled ? (
+                        </button>
 
-                            <XCircle size={15} />
 
-                          ) : (
 
-                            <CheckCircle2 size={15} />
+                        <button
 
-                          )}
+                          className="icon-button delete-button"
 
-                          {server.enabled ? "Disable" : "Enable"}
+                          title="Remove server"
 
-                        </button>
+                          aria-label={`Remove ${server.name}`}
 
+                          onClick={() =>
 
+                            performAction(server, "delete")
 
-                        <button
+                          }
 
-                          className="icon-button delete-button"
+                          disabled={busyId === server.id}
 
-                          title="Remove server"
+                        >
 
-                          aria-label={`Remove ${server.name}`}
+                          <Trash2 size={17} />
 
-                          onClick={() =>
+                        </button>
 
-                            performAction(server, "delete")
+                      </div>}
 
-                          }
+                    </div>
 
-                          disabled={busyId === server.id}
 
-                        >
 
-                          <Trash2 size={17} />
+                    <div className="endpoint-row">
 
-                        </button>
+                      <span className="endpoint-label">
 
-                      </div>
+                        <ExternalLink size={14} />
 
-                    </div>
+                        Endpoint
 
+                      </span>
 
+                      <code>{server.url}</code>
 
-                    <div className="endpoint-row">
+                    </div>
 
-                      <span className="endpoint-label">
 
-                        <ExternalLink size={14} />
 
-                        Endpoint
+                    <div className="server-metrics">
 
-                      </span>
+                      <div className="metric">
 
-                      <code>{server.url}</code>
+                        <span className="metric-label">
 
-                    </div>
+                          <Activity size={14} />
 
+                          Discovered tools
 
+                        </span>
 
-                    <div className="server-metrics">
+                        <strong>
 
-                      <div className="metric">
+                          {record.discovered_tools_count ?? 0}
 
-                        <span className="metric-label">
+                        </strong>
 
-                          <Activity size={14} />
+                      </div>
 
-                          Discovered tools
+                      <div className="metric">
 
-                        </span>
+                        <span className="metric-label">
 
-                        <strong>
+                          <Clock3 size={14} />
 
-                          {record.discovered_tools_count ?? 0}
+                          Last checked
 
-                        </strong>
+                        </span>
 
-                      </div>
+                        <strong className="metric-date">
 
-                      <div className="metric">
+                          {formatDate(record.last_checked)}
 
-                        <span className="metric-label">
+                        </strong>
 
-                          <Clock3 size={14} />
+                      </div>
 
-                          Last checked
+                      <div className="metric">
 
-                        </span>
+                        <span className="metric-label">
 
-                        <strong className="metric-date">
+                          <CheckCircle2 size={14} />
 
-                          {formatDate(record.last_checked)}
+                          Last successful check
 
-                        </strong>
+                        </span>
 
-                      </div>
+                        <strong className="metric-date">
 
-                      <div className="metric">
+                          {formatDate(
 
-                        <span className="metric-label">
+                            record.last_successful_check
 
-                          <CheckCircle2 size={14} />
+                          )}
 
-                          Last successful check
+                        </strong>
 
-                        </span>
+                      </div>
 
-                        <strong className="metric-date">
+                    </div>
 
-                          {formatDate(
 
-                            record.last_successful_check
 
-                          )}
+                    {record.last_error && server.enabled && (
 
-                        </strong>
+                      <div className="server-error">
 
-                      </div>
+                        <AlertCircle size={16} />
 
-                    </div>
+                        <span>{record.last_error}</span>
 
+                      </div>
 
+                    )}
 
-                    {record.last_error && server.enabled && (
+                  </article>
 
-                      <div className="server-error">
+                );
 
-                        <AlertCircle size={16} />
+              })}
 
-                        <span>{record.last_error}</span>
+            </div>
 
-                      </div>
+          )}
 
-                    )}
+        </section>
 
-                  </article>
 
-                );
 
-              })}
-
-            </div>
-
-          )}
-
-        </section>
-
-
-
-         </>}
+         </>}
 
         <footer className="page-footer">
 
-          <span>
+          <span>
 
-            <span className="connection-dot" />
+            <span className="connection-dot" />
 
-            MCP Gateway Management
+            MCP Gateway Management
 
-          </span>
+          </span>
 
-          <span>Registry API · Port 8101</span>
+          <span>Registry API · Port 8101</span>
 
-        </footer>
+        </footer>
 
-      </main>
+      </main>
 
-    </div>
+    </div>
 
-  );
+  );
 
 }
 
