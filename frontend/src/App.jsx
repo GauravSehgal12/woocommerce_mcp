@@ -137,6 +137,8 @@ function App() {
 
   const [showForm, setShowForm] = useState(false);
 
+  const [activePage, setActivePage] = useState("overview");
+
 
 
   const [form, setForm] = useState({
@@ -538,6 +540,8 @@ function App() {
 
 
           <div className="topbar-actions">
+
+            {activePage === "overview" && <>
 
             <span className="refresh-label">
 
