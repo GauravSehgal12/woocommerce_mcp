@@ -7,8 +7,17 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+import hmac
+import time
 
-from fastapi import Depends, Header, HTTPException, status
+from argon2 import PasswordHasher
+from argon2.exceptions import (
+    InvalidHashError,
+    VerificationError,
+    VerifyMismatchError,
+)
+
+from fastapi import Depends, Header, HTTPException, status,Cookie,Header
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -16,6 +25,11 @@ DATA_DIR = BASE_DIR / "data"
 DB_FILE = DATA_DIR / "security.db"
 
 API_KEY_PREFIX = "mcp_live_"
+
+SESSION_COOKIE_NAME = "woo_session"
+SESSION_TTL_SECONDS = 8 * 60 * 60  
+
+password_hasher = PasswordHasher()
 
 
 def utc_now() -> str:
@@ -92,6 +106,31 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_audit_user
                 ON audit_logs(user_id);
+
+            CREATE TABLE IF NOT EXISTS user_credentials (
+    user_id TEXT PRIMARY KEY,
+    password_hash TEXT NOT NULL,
+    password_updated_at TEXT NOT NULL,
+    FOREIGN KEY (user_id)
+        REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS browser_sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    expires_at REAL NOT NULL,
+    revoked_at TEXT,
+    FOREIGN KEY (user_id)
+        REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_browser_sessions_user
+    ON browser_sessions(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_browser_sessions_expiry
+    ON browser_sessions(expires_at);
             """
         )
 
@@ -99,6 +138,151 @@ def init_db() -> None:
 def hash_api_key(api_key: str) -> str:
     """Hash a high-entropy API key before storing it."""
     return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+
+def hash_password(password: str) -> str:
+    if len(password) < 12:
+        raise ValueError("Password must contain at least 12 characters.")
+    if len(password) > 1024:
+        raise ValueError("Password is too long.")
+
+    return password_hasher.hash(password)
+
+
+def set_user_password(user_id: str, password: str) -> None:
+    password_hash = hash_password(password)
+
+    with get_db() as db:
+        user = db.execute(
+            "SELECT id FROM users WHERE id = ? AND active = 1",
+            (user_id,),
+        ).fetchone()
+
+        if user is None:
+            raise ValueError("Active user was not found.")
+
+        db.execute(
+            """
+            INSERT INTO user_credentials (
+                user_id, password_hash, password_updated_at
+            )
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                password_hash = excluded.password_hash,
+                password_updated_at = excluded.password_updated_at
+            """,
+            (user_id, password_hash, utc_now()),
+        )
+
+
+def authenticate_password(username: str, password: str) -> dict:
+    with get_db() as db:
+        row = db.execute(
+            """
+            SELECT u.id, u.username, u.role, u.active,
+                   c.password_hash
+            FROM users u
+            JOIN user_credentials c ON c.user_id = u.id
+            WHERE u.username = ?
+            """,
+            (username.strip(),),
+        ).fetchone()
+
+    if row is None or not row["active"]:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid username or password.",
+        )
+
+    try:
+        password_hasher.verify(row["password_hash"], password)
+    except (VerifyMismatchError, VerificationError, InvalidHashError):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid username or password.",
+        )
+
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "role": row["role"],
+    }
+
+
+def create_browser_session(user_id: str) -> tuple[str, float]:
+    token = secrets.token_urlsafe(32)
+    session_id = secrets.token_hex(16)
+    expires_at = time.time() + SESSION_TTL_SECONDS
+
+    with get_db() as db:
+        user = db.execute(
+            "SELECT id FROM users WHERE id = ? AND active = 1",
+            (user_id,),
+        ).fetchone()
+
+        if user is None:
+            raise ValueError("Active user was not found.")
+
+        db.execute(
+            """
+            INSERT INTO browser_sessions (
+                id, user_id, token_hash, created_at, expires_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                user_id,
+                hash_api_key(token),
+                utc_now(),
+                expires_at,
+            ),
+        )
+
+    return token, expires_at
+
+
+def authenticate_browser_session(token: str | None) -> dict:
+    if not token:
+        raise HTTPException(status_code=401, detail="Login required.")
+
+    token_hash = hash_api_key(token)
+
+    with get_db() as db:
+        row = db.execute(
+            """
+            SELECT u.id, u.username, u.role, u.active
+            FROM browser_sessions s
+            JOIN users u ON u.id = s.user_id
+            WHERE s.token_hash = ?
+              AND s.revoked_at IS NULL
+              AND s.expires_at > ?
+            """,
+            (token_hash, time.time()),
+        ).fetchone()
+
+    if row is None or not row["active"]:
+        raise HTTPException(status_code=401, detail="Session expired or invalid.")
+
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "role": row["role"],
+    }
+
+
+def revoke_browser_session(token: str | None) -> None:
+    if not token:
+        return
+
+    with get_db() as db:
+        db.execute(
+            """
+            UPDATE browser_sessions
+            SET revoked_at = ?
+            WHERE token_hash = ? AND revoked_at IS NULL
+            """,
+            (utc_now(), hash_api_key(token)),
+        )
 
 
 def create_user(username: str, role: str) -> dict:
@@ -218,10 +402,16 @@ def authenticate_api_key(api_key: str | None) -> dict:
 
 def get_current_user(
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    woo_session: str | None = Cookie(
+        default=None,
+        alias=SESSION_COOKIE_NAME,
+    ),
 ) -> dict:
-    """FastAPI dependency for API-key authentication."""
-    return authenticate_api_key(x_api_key)
+    """Authenticate browser sessions or API-key clients."""
+    if x_api_key:
+        return authenticate_api_key(x_api_key)
 
+    return authenticate_browser_session(woo_session)
 
 def require_role(*allowed_roles: str) -> Callable:
     """Build a FastAPI dependency that enforces user roles."""

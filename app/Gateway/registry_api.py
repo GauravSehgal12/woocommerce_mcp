@@ -14,33 +14,48 @@ from fastapi import (
     HTTPException,
     status,
     Depends,
+    Cookie,
+    Response,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 try:
     from .security import (
+        authenticate_browser_session,
+        authenticate_password,
+        create_browser_session,
         create_user,
         get_current_user,
-        get_db,
         get_db,
         issue_api_key,
         list_users,
         list_user_keys,
         require_role,
         revoke_api_key,
+        revoke_browser_session,
+        SESSION_COOKIE_NAME,
+        SESSION_TTL_SECONDS,
+        set_user_password,
     )
 except ImportError:
     from security import (
+        authenticate_browser_session,
+        authenticate_password,
+        create_browser_session,
         create_user,
         get_current_user,
+        get_db,
         issue_api_key,
         list_users,
         list_user_keys,
         require_role,
         revoke_api_key,
+        revoke_browser_session,
+        SESSION_COOKIE_NAME,
+        SESSION_TTL_SECONDS,
+        set_user_password,
     )
-
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -61,7 +76,7 @@ app.add_middleware(
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "X-API-Key"],
 )
@@ -80,6 +95,15 @@ class ServerCreate(BaseModel):
 class CreateUserRequest(BaseModel):
     username: str = Field(min_length=1, max_length=80)
     role: str = Field(pattern=r"^(admin|member)$")
+    password: str = Field(min_length=12, max_length=1024)
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class SetPasswordRequest(BaseModel):
+    password: str = Field(min_length=12, max_length=1024)
 
 
 # ---------------------------------------------------------
@@ -189,6 +213,56 @@ def find_server(servers: list[dict], server_id: str) -> dict:
 def health():
     """Unauthenticated liveness check for the Registry API."""
     return {"status": "healthy"}
+
+
+# ---------------------------------------------------------
+# Browser authentication
+# ---------------------------------------------------------
+
+@app.post("/auth/login")
+def login(request: LoginRequest, response: Response):
+    user = authenticate_password(request.username, request.password)
+    token, expires_at = create_browser_session(user["id"])
+
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        max_age=SESSION_TTL_SECONDS,
+        httponly=True,
+        secure=os.getenv("AUTH_COOKIE_SECURE", "false").lower() == "true",
+        samesite="lax",
+        path="/",
+    )
+
+    return {
+        "user": user,
+        "expires_at": expires_at,
+    }
+
+
+@app.post("/auth/logout")
+def logout(
+    response: Response,
+    woo_session: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+):
+    revoke_browser_session(woo_session)
+
+    response.delete_cookie(
+        key=SESSION_COOKIE_NAME,
+        path="/",
+        httponly=True,
+        secure=os.getenv("AUTH_COOKIE_SECURE", "false").lower() == "true",
+        samesite="lax",
+    )
+
+    return {"message": "Logged out."}
+
+
+@app.get("/auth/me")
+def current_browser_user(
+    woo_session: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+):
+    return {"user": authenticate_browser_session(woo_session)}
 
 
 # ---------------------------------------------------------
@@ -404,14 +478,14 @@ def api_create_user(
     request: CreateUserRequest,
     admin: dict = Depends(require_role("admin")),
 ):
+
     try:
-        return create_user(request.username, request.role)
+        user = create_user(request.username, request.role)
+        set_user_password(user["id"], request.password)
+        return user
 
     except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     except Exception as exc:
         if "UNIQUE constraint failed" in str(exc):
@@ -420,7 +494,7 @@ def api_create_user(
                 detail="That username already exists.",
             ) from exc
         raise
-
+    
 
 @app.get("/users")
 def api_list_users(

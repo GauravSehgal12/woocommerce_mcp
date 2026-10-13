@@ -1,6 +1,8 @@
 
 import json
+from wsgiref import headers
 import requests
+import os
 
 MCP_URL = "http://127.0.0.1:8100/mcp"
 PROTOCOL_VERSION = "2025-11-25"
@@ -15,6 +17,11 @@ def post_mcp(payload):
         "Accept": "application/json, text/event-stream",
         "MCP-Protocol-Version": PROTOCOL_VERSION,
     }
+    api_key = os.getenv("GATEWAY_TEST_API_KEY")
+    if not api_key:
+        raise RuntimeError("GATEWAY_TEST_API_KEY is not set.")
+
+    headers["X-API-Key"] = api_key
 
     if session_id:
         headers["Mcp-Session-Id"] = session_id
