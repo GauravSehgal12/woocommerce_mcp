@@ -37,6 +37,7 @@ import {
 } from "lucide-react";
 
 import "./App.css";
+import AuditLogs from "./AuditLogs";
 
 
 
@@ -492,23 +493,9 @@ function App() {
 
         <div className="nav-section-label">WORKSPACE</div>
 
-        <div className="nav-item active">
-
-          <Activity size={18} />
-
-          <span>Overview</span>
-
-        </div>
-
-        <div className="nav-item">
-
-          <Server size={18} />
-
-          <span>MCP Servers</span>
-
-          <span className="nav-count">{servers.length}</span>
-
-        </div>
+        <button type="button" className={`nav-item ${activePage === "overview" ? "active" : ""}`} onClick={() => setActivePage("overview")}><Activity size={18} /><span>Overview</span></button>
+        <button type="button" className={`nav-item ${activePage === "overview" ? "active" : ""}`} onClick={() => setActivePage("overview")}><Server size={18} /><span>MCP Servers</span><span className="nav-count">{servers.length}</span></button>
+        <button type="button" className={`nav-item ${activePage === "audit" ? "active" : ""}`} onClick={() => setActivePage("audit")}><ShieldCheck size={18} /><span>Audit Logs</span></button>
 
 
 
@@ -542,15 +529,9 @@ function App() {
 
           <div>
 
-            <div className="breadcrumb">Workspace / Overview</div>
-
-            <h1>Server Dashboard</h1>
-
-            <p className="page-subtitle">
-
-              Monitor and manage your connected MCP servers.
-
-            </p>
+            <div className="breadcrumb">Workspace / {activePage === "audit" ? "Audit Logs" : "Overview"}</div>
+            <h1>{activePage === "audit" ? "Audit Logs" : "Server Dashboard"}</h1>
+            <p className="page-subtitle">{activePage === "audit" ? "Review authenticated tool activity and execution outcomes." : "Monitor and manage your connected MCP servers."}</p>
 
           </div>
 
@@ -608,7 +589,9 @@ function App() {
 
 
 
-        {error && (
+        {activePage === "audit" ? <AuditLogs /> : <> 
+
+        {error && (
 
           <div className="notice notice-error">
 
@@ -1166,7 +1149,9 @@ function App() {
 
 
 
-        <footer className="page-footer">
+         </>}
+
+        <footer className="page-footer">
 
           <span>
 
