@@ -4,8 +4,8 @@
     "name": "woocommerce",
     "url": "http://127.0.0.1:8001/mcp",
     "status": "healthy",
-    "last_checked": "2026-10-13T15:28:54.242640+00:00",
-    "last_successful_check": "2026-10-13T15:28:54.242640+00:00",
+    "last_checked": "2026-10-13T15:38:50.176343+00:00",
+    "last_successful_check": "2026-10-13T15:38:50.176343+00:00",
     "last_error": null,
     "discovered_tools_count": 6
   },
@@ -14,8 +14,8 @@
     "name": "inventory",
     "url": "http://127.0.0.1:8200/mcp",
     "status": "healthy",
-    "last_checked": "2026-10-13T15:28:54.551311+00:00",
-    "last_successful_check": "2026-10-13T15:28:54.551311+00:00",
+    "last_checked": "2026-10-13T15:38:50.583125+00:00",
+    "last_successful_check": "2026-10-13T15:38:50.583125+00:00",
     "last_error": null,
     "discovered_tools_count": 2
   }
