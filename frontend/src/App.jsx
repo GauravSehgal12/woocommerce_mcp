@@ -586,6 +586,7 @@ function App() {
               Add server
 
             </button>
+            </>}
 
           </div>
 
