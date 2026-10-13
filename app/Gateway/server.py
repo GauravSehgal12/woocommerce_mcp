@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Annotated, cast
 
+
 import uvicorn
 from dotenv import load_dotenv
 from pydantic import Field
@@ -16,11 +17,12 @@ from starlette.types import ASGIApp, Scope, Receive, Send
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.server.fastmcp import FastMCP
+from mcp import types
 
 try:
-    from .security import authenticate_api_key, init_db, record_audit_event
+    from .security import authenticate_api_key, init_db, record_audit_event, api_key_has_tool_permission
 except ImportError:
-    from security import authenticate_api_key, init_db, record_audit_event
+    from security import authenticate_api_key, init_db, record_audit_event, api_key_has_tool_permission
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -38,6 +40,49 @@ registered_tools: dict[str, dict[str, str]] = {}
 current_user_context: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "mcp_authenticated_user", default=None
 )
+
+def install_permission_filtered_tool_listing() -> None:
+    """Filter tools/list results for the authenticated API key."""
+    request_handlers = mcp._mcp_server.request_handlers
+
+    original_handler = request_handlers.get(types.ListToolsRequest)
+    if original_handler is None:
+        raise RuntimeError("MCP tools/list handler was not registered")
+
+    async def filtered_handler(request):
+        response = await original_handler(request)
+
+        # FastMCP's handler returns ServerResult(ListToolsResult(...)).
+        result = response.root if hasattr(response, "root") else response
+
+        if not isinstance(result, types.ListToolsResult):
+            return response
+
+        user = current_user_context.get()
+
+        # Fail closed if no authenticated identity is available.
+        if not user:
+            allowed_tools = []
+        elif user.get("role") == "admin":
+            allowed_tools = result.tools
+        else:
+            api_key_id = user.get("api_key_id")
+            allowed_tools = [
+                tool
+                for tool in result.tools
+                if api_key_has_tool_permission(
+                    api_key_id,
+                    tool.name,
+                )
+            ]
+
+        return types.ServerResult(
+            types.ListToolsResult(tools=allowed_tools)
+        )
+
+    request_handlers[types.ListToolsRequest] = filtered_handler
+
+install_permission_filtered_tool_listing()
 
 
 def read_registry() -> list[dict]:
@@ -201,6 +246,21 @@ def make_handler(
                 return {
                     "is_error": True,
                     "error": "The server URL changed. Refresh tool discovery.",
+                }
+
+            gateway_tool_name = f"{server_name}__{upstream_tool_name}"
+            if not user:
+                outcome = "denied"
+                details = "No authenticated gateway identity"
+                return {"is_error": True, "error": "Authentication is required."}
+            if user.get("role") != "admin" and not api_key_has_tool_permission(
+                user.get("api_key_id"), gateway_tool_name
+            ):
+                outcome = "denied"
+                details = "API key is not permitted to call this tool"
+                return {
+                    "is_error": True,
+                    "error": f"Permission denied for tool '{gateway_tool_name}'.",
                 }
 
             async with streamablehttp_client(server_url) as (read_stream, write_stream, _):

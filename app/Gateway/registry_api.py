@@ -19,6 +19,8 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
 
 try:
     from .security import (
@@ -28,7 +30,11 @@ try:
         create_user,
         get_current_user,
         get_db,
+        init_db,
         issue_api_key,
+        issue_api_key_with_metadata,
+        list_api_key_permissions,
+        set_api_key_permissions,
         list_users,
         list_user_keys,
         require_role,
@@ -46,7 +52,11 @@ except ImportError:
         create_user,
         get_current_user,
         get_db,
+        init_db,
         issue_api_key,
+        issue_api_key_with_metadata,
+        list_api_key_permissions,
+        set_api_key_permissions,
         list_users,
         list_user_keys,
         require_role,
@@ -77,9 +87,15 @@ app.add_middleware(
         "http://127.0.0.1:5173",
     ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "X-API-Key"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+def initialize_security_database() -> None:
+    # Idempotent schema migration, including api_key_permissions.
+    init_db()
 
 
 # ---------------------------------------------------------
@@ -97,7 +113,11 @@ class CreateUserRequest(BaseModel):
     role: str = Field(pattern=r"^(admin|member)$")
     password: str = Field(min_length=12, max_length=1024)
 
-class LoginRequest(BaseModel):
+class ApiKeyPermissionsRequest(BaseModel):
+    tools: list[str] = Field(default_factory=list, max_length=500)
+
+
+class LoginCredentialsRequest(BaseModel):
     username: str = Field(min_length=1, max_length=80)
     password: str = Field(min_length=1, max_length=1024)
 
@@ -220,7 +240,7 @@ def health():
 # ---------------------------------------------------------
 
 @app.post("/auth/login")
-def login(request: LoginRequest, response: Response):
+def login(request: LoginCredentialsRequest, response: Response):
     user = authenticate_password(request.username, request.password)
     token, expires_at = create_browser_session(user["id"])
 
@@ -504,42 +524,82 @@ def api_list_users(
 
 
 @app.post("/users/{user_id}/api-keys", status_code=201)
-def api_issue_key(
-    user_id: str,
-    admin: dict = Depends(require_role("admin")),
-):
+def api_issue_key(user_id: str, admin: dict = Depends(require_role("admin"))):
     try:
-        api_key = issue_api_key(user_id)
-        # The raw API key is returned only once.
-        return {"api_key": api_key}
-
+        # The raw secret is returned once; it is never persisted in plaintext.
+        return issue_api_key_with_metadata(user_id)
     except ValueError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=str(exc),
-        ) from exc
+        code = 404 if "not found" in str(exc).lower() else 400
+        raise HTTPException(status_code=code, detail=str(exc)) from exc
 
 
 @app.get("/users/{user_id}/api-keys")
-def api_list_keys(
-    user_id: str,
-    admin: dict = Depends(require_role("admin")),
-):
+def api_list_keys(user_id: str, admin: dict = Depends(require_role("admin"))):
+    if not any(item["id"] == user_id for item in list_users()):
+        raise HTTPException(status_code=404, detail="User was not found.")
     return {"api_keys": list_user_keys(user_id)}
 
 
 @app.post("/api-keys/{key_id}/revoke")
-def api_revoke_key(
+def api_revoke_key(key_id: str, admin: dict = Depends(require_role("admin"))):
+    if not revoke_api_key(key_id):
+        raise HTTPException(status_code=404, detail="API key not found or already revoked.")
+    return {"message": "API key revoked."}
+
+
+@app.get("/api-keys/{key_id}/permissions")
+def api_get_key_permissions(key_id: str, admin: dict = Depends(require_role("admin"))):
+    with get_db() as db:
+        row = db.execute(
+            "SELECT id FROM api_keys WHERE id = ? AND revoked_at IS NULL", (key_id,)
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Active API key was not found.")
+    return {"key_id": key_id, "tools": list_api_key_permissions(key_id)}
+
+
+@app.put("/api-keys/{key_id}/permissions")
+def api_put_key_permissions(
     key_id: str,
+    request: ApiKeyPermissionsRequest,
     admin: dict = Depends(require_role("admin")),
 ):
-    if not revoke_api_key(key_id):
-        raise HTTPException(
-            status_code=404,
-            detail="API key not found or already revoked.",
-        )
+    try:
+        tools = set_api_key_permissions(key_id, request.tools)
+    except ValueError as exc:
+        code = 404 if "not found" in str(exc).lower() else 400
+        raise HTTPException(status_code=code, detail=str(exc)) from exc
+    return {"key_id": key_id, "tools": tools, "count": len(tools)}
 
-    return {"message": "API key revoked."}
+
+@app.get("/available-tools")
+async def api_available_tools(admin: dict = Depends(require_role("admin"))):
+    """Discover fully-qualified tool names from enabled upstream MCP servers."""
+    with registry_lock:
+        servers = read_registry()
+    available, warnings = [], []
+    for server in servers:
+        if not server.get("enabled", False):
+            continue
+        try:
+            async with streamablehttp_client(server["url"]) as (read_stream, write_stream, _):
+                async with ClientSession(read_stream, write_stream) as client:
+                    await client.initialize()
+                    result = await client.list_tools()
+            for tool in result.tools:
+                available.append({
+                    "name": f"{server['name']}__{tool.name}",
+                    "server_name": server["name"],
+                    "tool_name": tool.name,
+                    "description": tool.description or "",
+                })
+        except Exception as exc:
+            warnings.append({
+                "server_name": server.get("name", "unknown"),
+                "error": f"Tool discovery failed ({type(exc).__name__}).",
+            })
+    available.sort(key=lambda item: item["name"].lower())
+    return {"tools": available, "warnings": warnings}
 
 
 # ---------------------------------------------------------

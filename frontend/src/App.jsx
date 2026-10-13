@@ -30,8 +30,16 @@ import {
   Server,
 
   ShieldCheck,
+  ShieldAlert,
 
   Trash2,
+
+  Users,
+
+  UserPlus,
+  KeyRound,
+  Copy,
+  LockKeyhole,
 
   XCircle,
 
@@ -142,6 +150,24 @@ function App() {
   const [showForm, setShowForm] = useState(false);
 
   const [activePage, setActivePage] = useState("overview");
+  const [users, setUsers] = useState([]);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [memberForm, setMemberForm] = useState({ username: "", password: "" });
+  const [memberBusy, setMemberBusy] = useState(false);
+  const [memberError, setMemberError] = useState("");
+  const [memberSuccess, setMemberSuccess] = useState("");
+  const [keysByUser, setKeysByUser] = useState({});
+  const [keysLoadingFor, setKeysLoadingFor] = useState("");
+  const [keyBusy, setKeyBusy] = useState("");
+  const [newSecret, setNewSecret] = useState(null);
+  const [availableTools, setAvailableTools] = useState([]);
+  const [toolWarnings, setToolWarnings] = useState([]);
+  const [editingKey, setEditingKey] = useState(null);
+  const [selectedTools, setSelectedTools] = useState([]);
+  const [permissionsBusy, setPermissionsBusy] = useState(false);
+  const [permissionError, setPermissionError] = useState("");
+  const [permissionSuccess, setPermissionSuccess] = useState("");
+
 
 
 
@@ -427,6 +453,172 @@ function App() {
 
 
 
+  const loadUsers = useCallback(async () => {
+    setUsersLoading(true);
+    setMemberError("");
+    try {
+      const response = await fetch(`${API_BASE}/users`, API_OPTIONS);
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(result.detail || "Could not load platform users.");
+      }
+      setUsers(result.users || []);
+    } catch (err) {
+      setMemberError(err.message || "Could not load platform users.");
+    } finally {
+      setUsersLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (user?.role === "admin" && activePage === "users") {
+      loadUsers();
+    }
+  }, [user, activePage, loadUsers]);
+
+  async function createMember(event) {
+    event.preventDefault();
+    setMemberBusy(true);
+    setMemberError("");
+    setMemberSuccess("");
+    try {
+      const response = await fetch(`${API_BASE}/users`, {
+        method: "POST",
+        ...API_OPTIONS,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: memberForm.username.trim(),
+          role: "member",
+          password: memberForm.password,
+        }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(result.detail || "Could not create the member account.");
+      }
+      setMemberForm({ username: "", password: "" });
+      setMemberSuccess(`Member "${result.username || memberForm.username.trim()}" created successfully.`);
+      await loadUsers();
+    } catch (err) {
+      setMemberError(err.message || "Could not create the member account.");
+    } finally {
+      setMemberBusy(false);
+    }
+  }
+
+  async function loadUserKeys(userId) {
+    setKeysLoadingFor(userId);
+    setMemberError("");
+    try {
+      const response = await fetch(`${API_BASE}/users/${userId}/api-keys`, API_OPTIONS);
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || "Could not load API keys.");
+      setKeysByUser((previous) => ({ ...previous, [userId]: result.api_keys || [] }));
+    } catch (err) {
+      setMemberError(err.message || "Could not load API keys.");
+    } finally {
+      setKeysLoadingFor("");
+    }
+  }
+
+  async function generateMemberKey(account) {
+    setKeyBusy(account.id);
+    setMemberError("");
+    setMemberSuccess("");
+    setNewSecret(null);
+    try {
+      const response = await fetch(`${API_BASE}/users/${account.id}/api-keys`, {
+        method: "POST", ...API_OPTIONS,
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || "Could not generate API key.");
+      setNewSecret({ username: account.username, keyId: result.key_id, key: result.api_key, prefix: result.key_prefix });
+      setMemberSuccess(`API key generated for ${account.username}. Copy it now; the full secret is shown only once.`);
+      await loadUserKeys(account.id);
+      await openPermissions(account, {
+        id: result.key_id, key_prefix: result.key_prefix,
+        created_at: new Date().toISOString(), revoked_at: null,
+      }, true);
+    } catch (err) {
+      setMemberError(err.message || "Could not generate API key.");
+    } finally {
+      setKeyBusy("");
+    }
+  }
+
+  async function revokeMemberKey(account, key) {
+    if (!window.confirm(`Revoke API key ${key.key_prefix} for ${account.username}? This cannot be undone.`)) return;
+    setKeyBusy(key.id);
+    setMemberError("");
+    try {
+      const response = await fetch(`${API_BASE}/api-keys/${key.id}/revoke`, {
+        method: "POST", ...API_OPTIONS,
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || "Could not revoke API key.");
+      setMemberSuccess(`API key ${key.key_prefix} revoked.`);
+      await loadUserKeys(account.id);
+      if (editingKey?.id === key.id) setEditingKey(null);
+    } catch (err) {
+      setMemberError(err.message || "Could not revoke API key.");
+    } finally {
+      setKeyBusy("");
+    }
+  }
+
+  async function openPermissions(account, key, skipFetch = false) {
+    setPermissionError("");
+    setPermissionSuccess("");
+    setEditingKey({ ...key, username: account.username, userId: account.id });
+    setSelectedTools([]);
+    try {
+      const [toolsResponse, permissionsResponse] = await Promise.all([
+        fetch(`${API_BASE}/available-tools`, API_OPTIONS),
+        skipFetch ? Promise.resolve(null) : fetch(`${API_BASE}/api-keys/${key.id}/permissions`, API_OPTIONS),
+      ]);
+      const toolsResult = await toolsResponse.json().catch(() => ({}));
+      if (!toolsResponse.ok) throw new Error(toolsResult.detail || "Could not discover available tools.");
+      setAvailableTools(toolsResult.tools || []);
+      setToolWarnings(toolsResult.warnings || []);
+      if (permissionsResponse) {
+        const permissionsResult = await permissionsResponse.json().catch(() => ({}));
+        if (!permissionsResponse.ok) throw new Error(permissionsResult.detail || "Could not load key permissions.");
+        setSelectedTools(permissionsResult.tools || []);
+      }
+    } catch (err) {
+      setPermissionError(err.message || "Could not load tool permissions.");
+    }
+  }
+
+  async function saveKeyPermissions(event) {
+    event.preventDefault();
+    if (!editingKey) return;
+    setPermissionsBusy(true);
+    setPermissionError("");
+    setPermissionSuccess("");
+    try {
+      const response = await fetch(`${API_BASE}/api-keys/${editingKey.id}/permissions`, {
+        method: "PUT", ...API_OPTIONS,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tools: selectedTools }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || "Could not save tool permissions.");
+      setSelectedTools(result.tools || []);
+      setPermissionSuccess(`Saved ${result.count} permitted tool${result.count === 1 ? "" : "s"} for ${editingKey.username}.`);
+    } catch (err) {
+      setPermissionError(err.message || "Could not save tool permissions.");
+    } finally {
+      setPermissionsBusy(false);
+    }
+  }
+
+  function toggleSelectedTool(toolName, checked) {
+    setSelectedTools((previous) => checked
+      ? [...new Set([...previous, toolName])]
+      : previous.filter((name) => name !== toolName));
+  }
+
   async function addServer(event) {
 
     event.preventDefault();
@@ -569,6 +761,7 @@ function App() {
 
         <button type="button" className={`nav-item ${activePage === "overview" ? "active" : ""}`} onClick={() => setActivePage("overview")}><Activity size={18} /><span>Overview</span></button>
         <button type="button" className={`nav-item ${activePage === "servers" ? "active" : ""}`} onClick={() => setActivePage("servers")}><Server size={18} /><span>MCP Servers</span><span className="nav-count">{servers.length}</span></button>
+        {user?.role === "admin" && <button type="button" className={`nav-item ${activePage === "users" ? "active" : ""}`} onClick={() => setActivePage("users")}><Users size={18} /><span>User Management</span><span className="nav-count">{users.length}</span></button>}
         <button type="button" className={`nav-item ${activePage === "audit" ? "active" : ""}`} onClick={() => setActivePage("audit")}><ShieldCheck size={18} /><span>Audit Logs</span></button>
 
 
@@ -603,9 +796,9 @@ function App() {
 
           <div>
 
-            <div className="breadcrumb">Workspace / {activePage === "audit" ? "Audit Logs" : activePage === "servers" ? "MCP Servers" : "Overview"}</div>
-            <h1>{activePage === "audit" ? "Audit Logs" : activePage === "servers" ? "MCP Servers" : "Server Dashboard"}</h1>
-            <p className="page-subtitle">{activePage === "audit" ? "Review authenticated tool activity and execution outcomes." : "Monitor and manage your connected MCP servers."}</p>
+            <div className="breadcrumb">Workspace / {activePage === "audit" ? "Audit Logs" : activePage === "servers" ? "MCP Servers" : activePage === "users" ? "User Management" : "Overview"}</div>
+            <h1>{activePage === "audit" ? "Audit Logs" : activePage === "servers" ? "MCP Servers" : activePage === "users" ? "User Management" : "Server Dashboard"}</h1>
+            <p className="page-subtitle">{activePage === "audit" ? "Review authenticated tool activity and execution outcomes." : activePage === "users" ? "Manage member API keys and per-key tool permissions." : "Monitor and manage your connected MCP servers."}</p>
 
           </div>
 
@@ -667,7 +860,140 @@ function App() {
 
 
 
-        {activePage === "audit" ? <AuditLogs /> : <>
+        {activePage === "users" && user?.role === "admin" ? (
+          <section className="panel">
+            <div className="section-heading">
+              <div>
+                <h2>Create a member account</h2>
+                <p>Members can sign in with these credentials. Passwords must contain at least 12 characters.</p>
+              </div>
+              <UserPlus size={22} />
+            </div>
+            {memberError && <div className="notice notice-error"><AlertCircle size={18} /><span>{memberError}</span><button type="button" onClick={() => setMemberError("")}>Dismiss</button></div>}
+            {memberSuccess && <div className="notice notice-success"><CheckCircle2 size={18} /><span>{memberSuccess}</span><button type="button" onClick={() => setMemberSuccess("")}>Dismiss</button></div>}
+            <form className="server-form" onSubmit={createMember}>
+              <label>
+                Username
+                <input required minLength={1} maxLength={80} autoComplete="off" value={memberForm.username} onChange={(e) => setMemberForm({ ...memberForm, username: e.target.value })} placeholder="e.g. store_operator" />
+              </label>
+              <label>
+                Temporary password
+                <input required minLength={12} maxLength={1024} type="password" autoComplete="new-password" value={memberForm.password} onChange={(e) => setMemberForm({ ...memberForm, password: e.target.value })} placeholder="At least 12 characters" />
+              </label>
+              <div className="form-actions">
+                <button type="submit" className="button button-primary" disabled={memberBusy}>
+                  {memberBusy ? <LoaderCircle size={16} className="spin" /> : <UserPlus size={16} />}
+                  {memberBusy ? "Creating member..." : "Create member"}
+                </button>
+              </div>
+            </form>
+            <div className="section-heading" style={{ marginTop: 32 }}>
+              <div><h2>Platform accounts</h2><p>{users.length} account{users.length === 1 ? "" : "s"} registered</p></div>
+              <button type="button" className="button button-secondary" onClick={loadUsers} disabled={usersLoading}><RefreshCw size={15} className={usersLoading ? "spin" : ""} /> Refresh</button>
+            </div>
+            {usersLoading ? (
+              <div className="empty-state"><LoaderCircle size={24} className="spin" /><p>Loading users...</p></div>
+            ) : users.length === 0 ? (
+              <div className="empty-state"><Users size={28} /><p>No platform accounts were returned.</p></div>
+            ) : (
+              <div className="server-list">
+                {users.map((account) => (
+                  <article className="server-card" key={account.id}>
+                    <div className="server-card-top">
+                      <div className="server-identity">
+                        <div className="server-icon"><Users size={20} /></div>
+                        <div>
+                          <div className="server-title-row"><h3>{account.username}</h3><StatusBadge status={account.active ? "active" : "disabled"} /></div>
+                          <p className="server-description">Role: {account.role}</p>
+                          <p className="server-description">Created: {formatDate(account.created_at)}</p>
+                        </div>
+                      </div>
+                      {account.role === "member" && (
+                        <div className="server-actions">
+                          <button type="button" className="button button-primary button-small" onClick={() => generateMemberKey(account)} disabled={keyBusy === account.id || !account.active}>
+                            {keyBusy === account.id ? <LoaderCircle size={15} className="spin" /> : <KeyRound size={15} />} Generate API key
+                          </button>
+                          <button type="button" className="button button-secondary button-small" onClick={() => loadUserKeys(account.id)} disabled={keysLoadingFor === account.id}>
+                            <RefreshCw size={15} className={keysLoadingFor === account.id ? "spin" : ""} /> Load keys
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    {account.role === "member" && (
+                      <div style={{ marginTop: 16 }}>
+                        {(keysByUser[account.id] || []).length === 0 ? (
+                          <p className="server-description">No API keys loaded or no keys have been issued yet.</p>
+                        ) : (
+                          <div className="server-list">
+                            {(keysByUser[account.id] || []).map((key) => (
+                              <div className="panel" key={key.id} style={{ padding: 14 }}>
+                                <div className="server-card-top">
+                                  <div>
+                                    <strong>{key.key_prefix}</strong>
+                                    <p className="server-description">Created: {formatDate(key.created_at)}</p>
+                                    <p className="server-description">Status: {key.revoked_at ? "Revoked" : "Active"}</p>
+                                  </div>
+                                  <div className="server-actions">
+                                    {!key.revoked_at && <button type="button" className="button button-secondary button-small" onClick={() => openPermissions(account, key)}><LockKeyhole size={15} /> Configure tools</button>}
+                                    {!key.revoked_at && <button type="button" className="button button-secondary button-small" onClick={() => revokeMemberKey(account, key)} disabled={keyBusy === key.id}>{keyBusy === key.id ? <LoaderCircle size={15} className="spin" /> : <ShieldCheck size={15} />} Revoke</button>}
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </article>
+                ))}
+              </div>
+            )}
+            {newSecret && (
+              <div className="panel" style={{ marginTop: 20, padding: 16 }}>
+                <div className="section-heading">
+                  <div><h3>New API key for {newSecret.username}</h3><p>Copy this secret now. It cannot be retrieved later.</p></div>
+                  <button type="button" className="icon-button" onClick={() => setNewSecret(null)} aria-label="Hide generated API key"><XCircle size={18} /></button>
+                </div>
+                <code style={{ display: "block", overflowWrap: "anywhere", padding: 12 }}>{newSecret.key}</code>
+                <div className="form-actions" style={{ marginTop: 12 }}>
+                  <button type="button" className="button button-primary" onClick={() => { navigator.clipboard.writeText(newSecret.key).then(() => setMemberSuccess("API key copied to clipboard.")).catch(() => setMemberError("Clipboard access failed; select and copy the key manually.")); }}>
+                    <Copy size={15} /> Copy API key
+                  </button>
+                </div>
+              </div>
+            )}
+            {editingKey && (
+              <section className="panel form-panel" style={{ marginTop: 20 }}>
+                <div className="section-heading">
+                  <div><h2>Tool permissions</h2><p>Key {editingKey.key_prefix || editingKey.id} for {editingKey.username}. Members can call only explicitly selected tools. An empty selection denies all tools.</p></div>
+                  <button type="button" className="icon-button" onClick={() => setEditingKey(null)} aria-label="Close tool permissions"><XCircle size={20} /></button>
+                </div>
+                {permissionError && <div className="notice notice-error"><AlertCircle size={18} /><span>{permissionError}</span></div>}
+                {permissionSuccess && <div className="notice notice-success"><CheckCircle2 size={18} /><span>{permissionSuccess}</span></div>}
+                {toolWarnings.length > 0 && <div className="notice notice-error"><AlertCircle size={18} /><span>Some MCP servers could not be queried. Tools from those servers may be missing until they are healthy.</span></div>}
+                {availableTools.length === 0 ? (
+                  <div className="empty-state"><ShieldAlert size={26} /><p>No tools discovered. Confirm enabled MCP servers are running, then reopen this editor.</p></div>
+                ) : (
+                  <form className="server-form" onSubmit={saveKeyPermissions}>
+                    <div style={{ display: "grid", gap: 12 }}>
+                      {availableTools.map((tool) => (
+                        <label key={tool.name} style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                          <input type="checkbox" checked={selectedTools.includes(tool.name)} onChange={(event) => toggleSelectedTool(tool.name, event.target.checked)} />
+                          <span><strong>{tool.name}</strong><span style={{ display: "block", opacity: 0.75 }}>{tool.description || `Tool on ${tool.server_name}`}</span></span>
+                        </label>
+                      ))}
+                    </div>
+                    <div className="form-actions">
+                      <button type="button" className="button button-secondary" onClick={() => setSelectedTools(availableTools.map((tool) => tool.name))}>Select all</button>
+                      <button type="button" className="button button-secondary" onClick={() => setSelectedTools([])}>Clear all</button>
+                      <button type="submit" className="button button-primary" disabled={permissionsBusy}>{permissionsBusy ? <LoaderCircle size={15} className="spin" /> : <LockKeyhole size={15} />}{permissionsBusy ? "Saving..." : "Save permissions"}</button>
+                    </div>
+                  </form>
+                )}
+              </section>
+            )}
+          </section>
+        ) : activePage === "audit" ? <AuditLogs /> : <>
 
         {error && (
 

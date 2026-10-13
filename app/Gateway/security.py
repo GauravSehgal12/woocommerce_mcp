@@ -131,6 +131,16 @@ CREATE INDEX IF NOT EXISTS idx_browser_sessions_user
 
 CREATE INDEX IF NOT EXISTS idx_browser_sessions_expiry
     ON browser_sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS api_key_permissions (
+    api_key_id TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (api_key_id, tool_name),
+    FOREIGN KEY (api_key_id) REFERENCES api_keys(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_api_key_permissions_tool
+    ON api_key_permissions(tool_name);
             """
         )
 
@@ -314,47 +324,29 @@ def create_user(username: str, role: str) -> dict:
     }
 
 
-def issue_api_key(user_id: str) -> str:
-    """
-    Issue a new API key and return it once.
-
-    Only its SHA-256 hash is persisted. The original key cannot
-    be recovered from the database.
-    """
+def issue_api_key_with_metadata(user_id: str) -> dict:
+    """Issue a key; return the secret only once and persist only its hash."""
     raw_key = API_KEY_PREFIX + secrets.token_urlsafe(32)
     key_id = secrets.token_hex(16)
     key_hash = hash_api_key(raw_key)
     key_prefix = raw_key[:len(API_KEY_PREFIX) + 8]
-
     with get_db() as db:
-        user = db.execute(
-            "SELECT id, active FROM users WHERE id = ?",
-            (user_id,),
-        ).fetchone()
-
+        user = db.execute("SELECT id, active FROM users WHERE id = ?", (user_id,)).fetchone()
         if user is None:
             raise ValueError("User was not found.")
-
         if not user["active"]:
             raise ValueError("Cannot issue a key to an inactive user.")
-
         db.execute(
-            """
-            INSERT INTO api_keys (
-                id, user_id, key_hash, key_prefix, created_at
-            )
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                key_id,
-                user_id,
-                key_hash,
-                key_prefix,
-                utc_now(),
-            ),
+            """INSERT INTO api_keys (id, user_id, key_hash, key_prefix, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (key_id, user_id, key_hash, key_prefix, utc_now()),
         )
+    return {"api_key": raw_key, "key_id": key_id, "key_prefix": key_prefix}
 
-    return raw_key
+
+def issue_api_key(user_id: str) -> str:
+    """Backward-compatible helper returning only the raw secret."""
+    return issue_api_key_with_metadata(user_id)["api_key"]
 
 
 def authenticate_api_key(api_key: str | None) -> dict:
@@ -479,6 +471,67 @@ def list_user_keys(user_id: str) -> list[dict]:
         ).fetchall()
 
     return [dict(row) for row in rows]
+
+
+
+def set_api_key_permissions(key_id: str, tool_names: list[str]) -> list[str]:
+    """Replace a key's tool allowlist; an empty list denies all member tools."""
+    normalized, seen = [], set()
+    for name in tool_names:
+        if not isinstance(name, str):
+            raise ValueError("Tool names must be strings.")
+        name = name.strip()
+        if not name or len(name) > 160:
+            raise ValueError("Each tool name must contain 1 to 160 characters.")
+        if name not in seen:
+            normalized.append(name)
+            seen.add(name)
+    with get_db() as db:
+        key = db.execute(
+            """SELECT api_keys.id, users.active
+               FROM api_keys JOIN users ON users.id = api_keys.user_id
+               WHERE api_keys.id = ? AND api_keys.revoked_at IS NULL""",
+            (key_id,),
+        ).fetchone()
+        if key is None:
+            raise ValueError("Active API key was not found.")
+        if not key["active"]:
+            raise ValueError("Cannot configure a key for an inactive user.")
+        db.execute("DELETE FROM api_key_permissions WHERE api_key_id = ?", (key_id,))
+        db.executemany(
+            """INSERT INTO api_key_permissions (api_key_id, tool_name, created_at)
+               VALUES (?, ?, ?)""",
+            [(key_id, name, utc_now()) for name in normalized],
+        )
+    return normalized
+
+
+def list_api_key_permissions(key_id: str) -> list[str]:
+    """List explicit permissions for an active API key."""
+    with get_db() as db:
+        rows = db.execute(
+            """SELECT p.tool_name FROM api_key_permissions AS p
+               JOIN api_keys AS k ON k.id = p.api_key_id
+               WHERE p.api_key_id = ? AND k.revoked_at IS NULL
+               ORDER BY p.tool_name""",
+            (key_id,),
+        ).fetchall()
+    return [row["tool_name"] for row in rows]
+
+
+def api_key_has_tool_permission(key_id: str | None, tool_name: str) -> bool:
+    """Fail closed: members require an explicit permission for every tool."""
+    if not key_id:
+        return False
+    with get_db() as db:
+        row = db.execute(
+            """SELECT 1 FROM api_key_permissions AS p
+               JOIN api_keys AS k ON k.id = p.api_key_id
+               WHERE p.api_key_id = ? AND p.tool_name = ?
+                 AND k.revoked_at IS NULL LIMIT 1""",
+            (key_id, tool_name),
+        ).fetchone()
+    return row is not None
 
 
 def record_audit_event(
