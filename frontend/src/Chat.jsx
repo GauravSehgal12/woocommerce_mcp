@@ -21,7 +21,11 @@ export default function Chat() {
   const endRef = useRef(null);
   const inputRef = useRef(null);
 
-  useEffect(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), [messages, busy]);
+  
+    useEffect(() => {
+  endRef.current?.scrollIntoView({ behavior: "smooth" });
+}, [messages, busy]);
+
 
   async function sendMessage(text = draft) {
     const content = text.trim();
