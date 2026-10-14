@@ -1,4 +1,13 @@
+# Environment variables and secrets
 .env
-__pycache__
-.\app\Gateway\data\health.json
-.\app\Gateway\data\security.db
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Runtime data
+/app/Gateway/data/health.json
+/app/Gateway/data/security.db
