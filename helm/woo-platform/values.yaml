@@ -43,6 +43,12 @@ wooMcp:
   storeUrl: http://woo-platform-wordpress
   credentialsSecret: woocommerce-api-credentials
 
+gatewayDataPvc:
+  create: false
+  name: gateway-data
+  size: 1Gi
+  storageClass: ""
+
 ingress:
   enabled: true
   className: nginx
