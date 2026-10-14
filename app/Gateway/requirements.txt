@@ -5,3 +5,4 @@ fastapi
 pytest
 httpx
 argon2-cffi>=23.1.0
+groq>=0.13.0

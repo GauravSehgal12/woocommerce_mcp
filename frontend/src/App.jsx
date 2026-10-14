@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import Chat from "./chat";
 
 import {
 
@@ -42,6 +43,7 @@ import {
   LockKeyhole,
 
   XCircle,
+  Bot,
 
 } from "lucide-react";
 
@@ -763,7 +765,10 @@ function App() {
         <button type="button" className={`nav-item ${activePage === "servers" ? "active" : ""}`} onClick={() => setActivePage("servers")}><Server size={18} /><span>MCP Servers</span><span className="nav-count">{servers.length}</span></button>
         {user?.role === "admin" && <button type="button" className={`nav-item ${activePage === "users" ? "active" : ""}`} onClick={() => setActivePage("users")}><Users size={18} /><span>User Management</span><span className="nav-count">{users.length}</span></button>}
         <button type="button" className={`nav-item ${activePage === "audit" ? "active" : ""}`} onClick={() => setActivePage("audit")}><ShieldCheck size={18} /><span>Audit Logs</span></button>
-
+        <button type="button" className={`nav-item ${activePage === "chat" ? "active" : ""}`} onClick={() => setActivePage("chat")}>
+  <Bot size={18} />
+  <span>Chat Assistant</span>
+</button>
 
 
         <div className="sidebar-bottom">
@@ -796,9 +801,37 @@ function App() {
 
           <div>
 
-            <div className="breadcrumb">Workspace / {activePage === "audit" ? "Audit Logs" : activePage === "servers" ? "MCP Servers" : activePage === "users" ? "User Management" : "Overview"}</div>
-            <h1>{activePage === "audit" ? "Audit Logs" : activePage === "servers" ? "MCP Servers" : activePage === "users" ? "User Management" : "Server Dashboard"}</h1>
-            <p className="page-subtitle">{activePage === "audit" ? "Review authenticated tool activity and execution outcomes." : activePage === "users" ? "Manage member API keys and per-key tool permissions." : "Monitor and manage your connected MCP servers."}</p>
+            <div className="breadcrumb">
+  Workspace / {
+    activePage === "chat" ? "Chat Assistant" :
+    activePage === "audit" ? "Audit Logs" :
+    activePage === "servers" ? "MCP Servers" :
+    activePage === "users" ? "User Management" :
+    "Overview"
+  }
+</div>
+
+<h1>
+  {
+    activePage === "chat" ? "Chat Assistant" :
+    activePage === "audit" ? "Audit Logs" :
+    activePage === "servers" ? "MCP Servers" :
+    activePage === "users" ? "User Management" :
+    "Server Dashboard"
+  }
+</h1>
+
+<p className="page-subtitle">
+  {
+    activePage === "chat"
+      ? "Ask questions about your connected MCP tools and store data."
+      : activePage === "audit"
+      ? "Review authenticated tool activity and execution outcomes."
+      : activePage === "users"
+      ? "Manage member API keys and per-key tool permissions."
+      : "Monitor and manage your connected MCP servers."
+  }
+</p>
 
           </div>
 
@@ -993,7 +1026,8 @@ function App() {
               </section>
             )}
           </section>
-        ) : activePage === "audit" ? <AuditLogs /> : <>
+        )  : activePage === "chat" ? <Chat />
+           : activePage === "audit" ? <AuditLogs /> : <>
 
         {error && (
 
