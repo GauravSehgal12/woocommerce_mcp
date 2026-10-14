@@ -1,0 +1,58 @@
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: woo-agent
+  namespace: woo-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: woo-agent
+  template:
+    metadata:
+      labels:
+        app: woo-agent
+    spec:
+      containers:
+        - name: woo-agent
+          image: woo-agent:v1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8300
+          envFrom:
+            - secretRef:
+                name: woo-agent-secrets
+          env:
+            - name: MCP_GATEWAY_URL
+              value: "http://woo-gateway.woo-platform.svc.cluster.local:8100/mcp"
+            - name: GROQ_MODEL
+              value: "llama-3.3-70b-versatile"
+            - name: AGENT_MAX_STEPS
+              value: "5"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8300
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8300
+            initialDelaySeconds: 20
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: woo-agent
+  namespace: woo-platform
+spec:
+  selector:
+    app: woo-agent
+  ports:
+    - name: http
+      port: 8300
+      targetPort: 8300
+  type: ClusterIP

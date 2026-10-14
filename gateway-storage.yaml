@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gateway-data
+  namespace: woo-platform
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gateway-data-init
+  namespace: woo-platform
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: initialize-data
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              for f in servers.json health.json security.db; do
+                if [ ! -f "/data/$f" ]; then
+                  cp "/seed/$f" "/data/$f"
+                fi
+              done
+              ls -l /data
+          volumeMounts:
+            - name: gateway-data
+              mountPath: /data
+            - name: gateway-seed
+              mountPath: /seed
+              readOnly: true
+      volumes:
+        - name: gateway-data
+          persistentVolumeClaim:
+            claimName: gateway-data
+        - name: gateway-seed
+          secret:
+            secretName: gateway-data-seed

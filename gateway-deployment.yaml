@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: woo-gateway
+  namespace: woo-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: woo-gateway
+  template:
+    metadata:
+      labels:
+        app: woo-gateway
+    spec:
+      containers:
+        - name: gateway
+          image: woo-gateway:v1.0.1
+          imagePullPolicy: IfNotPresent
+          command: ["python", "server.py"]
+          env:
+            - name: GATEWAY_HOST
+              value: "0.0.0.0"
+            - name: GATEWAY_PORT
+              value: "8100"
+          ports:
+            - containerPort: 8100
+          volumeMounts:
+            - name: gateway-data
+              mountPath: /app/data
+          readinessProbe:
+            tcpSocket:
+              port: 8100
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 8100
+            initialDelaySeconds: 20
+            periodSeconds: 20
+      volumes:
+        - name: gateway-data
+          persistentVolumeClaim:
+            claimName: gateway-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: woo-gateway
+  namespace: woo-platform
+spec:
+  type: ClusterIP
+  selector:
+    app: woo-gateway
+  ports:
+    - name: http
+      port: 8100
+      targetPort: 8100
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: woo-registry-api
+  namespace: woo-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: woo-registry-api
+  template:
+    metadata:
+      labels:
+        app: woo-registry-api
+    spec:
+      containers:
+        - name: registry-api
+          image: woo-gateway:v1.0.1
+          imagePullPolicy: IfNotPresent
+          command:
+            - uvicorn
+            - registry_api:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8101"
+          ports:
+            - containerPort: 8101
+          volumeMounts:
+            - name: gateway-data
+              mountPath: /app/data
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8101
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: gateway-data
+          persistentVolumeClaim:
+            claimName: gateway-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: woo-registry-api
+  namespace: woo-platform
+spec:
+  type: ClusterIP
+  selector:
+    app: woo-registry-api
+  ports:
+    - name: http
+      port: 8101
+      targetPort: 8101

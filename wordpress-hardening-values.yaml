@@ -1,0 +1,32 @@
+﻿allowEmptyPassword: false
+wordpressScheme: http
+wordpressUsername: admin
+
+persistence:
+  enabled: true
+  size: 8Gi
+  storageClass: standard
+
+mariadb:
+  enabled: true
+  auth:
+    database: bitnami_wordpress
+    username: bn_wordpress
+    existingSecret: woo-mariadb-credentials
+  primary:
+    persistence:
+      enabled: true
+      size: 8Gi
+      storageClass: standard
+    resourcesPreset: micro
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 768Mi
+  requests:
+    cpu: 200m
+    memory: 384Mi
+
+service:
+  type: ClusterIP

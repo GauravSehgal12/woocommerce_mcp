@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from typing import Any, cast
@@ -15,7 +16,7 @@ from mcp.client.streamable_http import streamablehttp_client
 from pydantic import BaseModel, Field
 
 load_dotenv()
-
+logger = logging.getLogger(__name__)
 MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "http://127.0.0.1:8100/mcp")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 MAX_AGENT_STEPS = int(os.getenv("AGENT_MAX_STEPS", "5"))
@@ -193,8 +194,11 @@ async def chat(
     except HTTPException:
         raise
     except Exception as exc:
-        # Do not return exception text: it can contain URLs or sensitive details.
+        logger.exception(
+        "Chat request failed with exception type %s",
+        type(exc).__name__,
+    )
         raise HTTPException(
-            status_code=502,
-            detail=f"Chat agent could not reach the MCP Gateway ({type(exc).__name__}).",
-        ) from None
+        status_code=502,
+        detail=f"Chat request failed ({type(exc).__name__}). Check agent logs.",
+    ) from None

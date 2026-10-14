@@ -1,0 +1,22 @@
+{
+  "ea43abcf-6a21-4895-a4cd-7691e8bd556a": {
+    "server_id": "ea43abcf-6a21-4895-a4cd-7691e8bd556a",
+    "name": "woocommerce",
+    "url": "http://127.0.0.1:8001/mcp",
+    "status": "healthy",
+    "last_checked": "2026-10-14T15:25:21.976826+00:00",
+    "last_successful_check": "2026-10-14T15:25:21.976826+00:00",
+    "last_error": null,
+    "discovered_tools_count": 6
+  },
+  "a3fd5e3a-2643-444e-80bb-e09d7d635c79": {
+    "server_id": "a3fd5e3a-2643-444e-80bb-e09d7d635c79",
+    "name": "inventory",
+    "url": "http://127.0.0.1:8200/mcp",
+    "status": "healthy",
+    "last_checked": "2026-10-14T15:25:22.595681+00:00",
+    "last_successful_check": "2026-10-14T15:25:22.595681+00:00",
+    "last_error": null,
+    "discovered_tools_count": 2
+  }
+}
