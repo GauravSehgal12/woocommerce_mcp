@@ -1,4 +1,4 @@
-﻿{{- if .Values.wooMcp.enabled }}
+{{- if .Values.wooMcp.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -35,8 +35,7 @@ spec:
                   name: {{ .Values.wooMcp.credentialsSecret }}
                   key: WOOCOMMERCE_CONSUMER_SECRET
             - name: PORT
-              value: "8000"
-          
+              value: {{ .Values.wooMcp.port | quote }}
           resources:
             {{- toYaml .Values.resources.wooMcp | nindent 12 }}
           readinessProbe:
@@ -62,5 +61,5 @@ spec:
   ports:
     - name: http
       port: 8000
-      targetPort: 8000
+      targetPort: http
 {{- end }}

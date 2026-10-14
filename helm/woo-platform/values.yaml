@@ -1,4 +1,4 @@
-﻿namespace: woo-platform
+namespace: woo-platform
 
 frontend:
   enabled: true
@@ -43,15 +43,21 @@ wooMcp:
   storeUrl: http://woo-platform-wordpress
   credentialsSecret: woocommerce-api-credentials
 
-resources:
-  wooMcp:
-    requests:
-      cpu: 100m
-      memory: 128Mi
-    limits:
-      cpu: 500m
-      memory: 512Mi
+gatewayDataPvc:
+  create: false
+  name: gateway-data
+  size: 1Gi
+  storageClass: ""
 
+ingress:
+  enabled: true
+  className: nginx
+  annotations: {}
+  dashboardHost: dashboard.localhost
+  storeHost: store.localhost
+  tls: []
+
+resources:
   frontend:
     requests:
       cpu: 50m
@@ -59,3 +65,31 @@ resources:
     limits:
       cpu: 300m
       memory: 256Mi
+  agent:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1536Mi
+  gateway:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  registry:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  wooMcp:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi

@@ -1,4 +1,4 @@
-﻿namespace: woo-platform
+namespace: woo-platform
 
 frontend:
   image: woo-frontend:v1.0.0
@@ -26,3 +26,13 @@ wooMcp:
   image: woo-mcp-service:local
   imagePullPolicy: IfNotPresent
   replicas: 1
+
+gatewayDataPvc:
+  create: false
+  name: gateway-data
+
+ingress:
+  enabled: true
+  className: nginx
+  dashboardHost: dashboard.localhost
+  storeHost: store.localhost

@@ -1,0 +1,16 @@
+{{- if .Values.gatewayDataPvc.create }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.gatewayDataPvc.name }}
+  namespace: {{ .Values.namespace }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.gatewayDataPvc.size }}
+  {{- if .Values.gatewayDataPvc.storageClass }}
+  storageClassName: {{ .Values.gatewayDataPvc.storageClass | quote }}
+  {{- end }}
+{{- end }}

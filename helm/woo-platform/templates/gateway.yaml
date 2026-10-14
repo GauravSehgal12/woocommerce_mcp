@@ -1,4 +1,3 @@
-﻿
 {{- if .Values.gateway.enabled }}
 apiVersion: apps/v1
 kind: Deployment
@@ -33,14 +32,16 @@ spec:
               mountPath: /app/data
           readinessProbe:
             tcpSocket:
-              port: 8100
+              port: http
             initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
             tcpSocket:
-              port: 8100
+              port: http
             initialDelaySeconds: 20
             periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources.gateway | nindent 12 }}
       volumes:
         - name: gateway-data
           persistentVolumeClaim:
@@ -58,7 +59,7 @@ spec:
   ports:
     - name: http
       port: 8100
-      targetPort: 8100
+      targetPort: http
 {{- end }}
 ---
 {{- if .Values.registry.enabled }}
@@ -97,9 +98,17 @@ spec:
           readinessProbe:
             httpGet:
               path: /health
-              port: 8101
+              port: http
             initialDelaySeconds: 10
             periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources.registry | nindent 12 }}
       volumes:
         - name: gateway-data
           persistentVolumeClaim:
@@ -117,5 +126,5 @@ spec:
   ports:
     - name: http
       port: 8101
-      targetPort: 8101
+      targetPort: http
 {{- end }}
