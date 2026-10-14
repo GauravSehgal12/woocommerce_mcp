@@ -13,7 +13,7 @@ This repository uses the same `helm/woo-platform` chart for Kind and k3s. Enviro
 - `gateway-data`: persistent volume shared by the gateway and registry. Keep both at one replica while they share this ReadWriteOnce volume and file-backed state.
 - WordPress uploads/content and MariaDB data must use their own persistent claims from the WordPress Helm release.
 
-The application chart configures readiness/liveness probes and resource requests/limits for all five application Deployments. The WordPress and MariaDB Deployments are managed by the separate Bitnami WordPress chart; keep that chart's built-in probes enabled and configure explicit requests/limits and persistence in its values for each environment.
+The application chart configures readiness/liveness probes and resource requests/limits for all five application Deployments. WordPress and MariaDB are managed by the separate Bitnami WordPress chart. The shared baseline at `helm/wordpress/values-platform.yaml` specifies persistent claims, probes, and resource requests/limits. Merge it with the existing environment-specific WordPress values; do not apply it alone over the existing release, because its current secret references, hostname, and storage configuration must be preserved.
 
 ## Secrets
 
@@ -25,9 +25,9 @@ Never commit credentials, populated `.env` files, Kubernetes Secret YAML contain
 Example PowerShell setup. Set the values in your own shell first; do not paste them into source files or commit them:
 
 ```powershell
-$env:GROQ_API_KEY = Read-Host "Groq API key"
-$env:WOOCOMMERCE_CONSUMER_KEY = Read-Host "WooCommerce consumer key"
-$env:WOOCOMMERCE_CONSUMER_SECRET = Read-Host "WooCommerce consumer secret"
+$env:GROQ_API_KEY = [System.Net.NetworkCredential]::new("", (Read-Host "Groq API key" -AsSecureString)).Password
+$env:WOOCOMMERCE_CONSUMER_KEY = [System.Net.NetworkCredential]::new("", (Read-Host "WooCommerce consumer key" -AsSecureString)).Password
+$env:WOOCOMMERCE_CONSUMER_SECRET = [System.Net.NetworkCredential]::new("", (Read-Host "WooCommerce consumer secret" -AsSecureString)).Password
 
 kubectl create namespace woo-platform --dry-run=client -o yaml | kubectl apply -f -
 
