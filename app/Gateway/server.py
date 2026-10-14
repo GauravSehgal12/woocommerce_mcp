@@ -1,5 +1,7 @@
 import asyncio
 import contextvars
+from collections import deque
+from math import ceil
 import inspect
 import json
 import os
@@ -34,6 +36,11 @@ HEALTH_FILE = BASE_DIR / "data" / "health.json"
 GATEWAY_HOST = os.getenv("GATEWAY_HOST", "127.0.0.1")
 GATEWAY_PORT = int(os.getenv("GATEWAY_PORT", "8100"))
 REFRESH_INTERVAL = 5
+# Sliding-window rate limit for authenticated MCP HTTP requests.
+GATEWAY_RATE_LIMIT = max(1, int(os.getenv("GATEWAY_RATE_LIMIT", "60")))
+GATEWAY_RATE_WINDOW_SECONDS = max(
+    1, int(os.getenv("GATEWAY_RATE_WINDOW_SECONDS", "60"))
+)
 
 mcp = FastMCP("woo-mcp-gateway", host=GATEWAY_HOST, port=GATEWAY_PORT)
 registered_tools: dict[str, dict[str, str]] = {}
@@ -464,10 +471,54 @@ async def refresh_loop() -> None:
 
 
 class MCPAPIKeyMiddleware:
-    """Require an API key for MCP HTTP requests."""
+    """Authenticate MCP requests and apply a per-API-key sliding-window limit.
 
-    def __init__(self, app: ASGIApp):
+    The in-memory limiter is suitable for a single Gateway process. Multiple
+    worker processes/replicas need a shared limiter (for example Redis or an
+    ingress-level rate limit) to enforce one global quota.
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        rate_limit: int = GATEWAY_RATE_LIMIT,
+        window_seconds: int = GATEWAY_RATE_WINDOW_SECONDS,
+    ):
+        if rate_limit < 1 or window_seconds < 1:
+            raise ValueError("Rate limit and window must be positive integers.")
         self.app = app
+        self.rate_limit = rate_limit
+        self.window_seconds = window_seconds
+        self._requests: dict[str, deque[float]] = {}
+        self._request_count = 0
+        self._last_cleanup = time.monotonic()
+
+    def _allow_request(self, api_key_id: str) -> tuple[bool, int]:
+        """Return (allowed, retry_after_seconds) for this API key."""
+        now = time.monotonic()
+        cutoff = now - self.window_seconds
+        timestamps = self._requests.setdefault(api_key_id, deque())
+
+        while timestamps and timestamps[0] <= cutoff:
+            timestamps.popleft()
+
+        self._request_count += 1
+        # Periodically remove inactive keys so old key IDs do not accumulate.
+        if self._request_count % 256 == 0 or now - self._last_cleanup >= self.window_seconds:
+            for key_id, key_timestamps in list(self._requests.items()):
+                while key_timestamps and key_timestamps[0] <= cutoff:
+                    key_timestamps.popleft()
+                if not key_timestamps:
+                    self._requests.pop(key_id, None)
+            self._last_cleanup = now
+            timestamps = self._requests.setdefault(api_key_id, deque())
+
+        if len(timestamps) >= self.rate_limit:
+            retry_after = max(1, ceil(self.window_seconds - (now - timestamps[0])))
+            return False, retry_after
+
+        timestamps.append(now)
+        return True, 0
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -495,6 +546,28 @@ class MCPAPIKeyMiddleware:
             await send({
                 "type": "http.response.body",
                 "body": b'{"detail":"A valid API key is required."}',
+            })
+            return
+
+        # Authenticated API keys always have an api_key_id. Use a hash of the
+        # presented key only as a safe fallback; never retain the raw key.
+        api_key_id = user.get("api_key_id")
+        if not api_key_id:
+            import hashlib
+            api_key_id = hashlib.sha256(raw_key).hexdigest()
+        allowed, retry_after = self._allow_request(str(api_key_id))
+        if not allowed:
+            await send({
+                "type": "http.response.start",
+                "status": 429,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"retry-after", str(retry_after).encode("ascii")),
+                ],
+            })
+            await send({
+                "type": "http.response.body",
+                "body": b'{"detail":"Rate limit exceeded. Try again later."}',
             })
             return
 
