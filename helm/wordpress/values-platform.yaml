@@ -1,0 +1,35 @@
+# Merge this file with the existing environment-specific values used by the
+# Bitnami WordPress chart. Do not apply it alone over an existing release:
+# preserve the current password-secret references, hostname, and storage settings.
+wordpress:
+  persistence:
+    enabled: true
+    size: 8Gi
+  readinessProbe:
+    enabled: true
+  livenessProbe:
+    enabled: true
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+mariadb:
+  primary:
+    persistence:
+      enabled: true
+      size: 8Gi
+    readinessProbe:
+      enabled: true
+    livenessProbe:
+      enabled: true
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
