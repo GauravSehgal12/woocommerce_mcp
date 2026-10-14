@@ -1,0 +1,28 @@
+﻿namespace: woo-platform
+
+frontend:
+  image: woo-frontend:v1.0.0
+  imagePullPolicy: IfNotPresent
+  replicas: 1
+
+agent:
+  image: woo-agent:v1.0.1
+  imagePullPolicy: IfNotPresent
+  replicas: 1
+
+gateway:
+  image: woo-gateway:v1.0.1
+  imagePullPolicy: IfNotPresent
+  replicas: 1
+  dataClaim: gateway-data
+
+registry:
+  image: woo-gateway:v1.0.1
+  imagePullPolicy: IfNotPresent
+  replicas: 1
+  dataClaim: gateway-data
+
+wooMcp:
+  image: woo-mcp-service:local
+  imagePullPolicy: IfNotPresent
+  replicas: 1

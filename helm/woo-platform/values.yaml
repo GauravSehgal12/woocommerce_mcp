@@ -1,0 +1,61 @@
+﻿namespace: woo-platform
+
+frontend:
+  enabled: true
+  image: woo-frontend:v1.0.0
+  imagePullPolicy: IfNotPresent
+  replicas: 1
+  port: 80
+
+agent:
+  enabled: true
+  image: woo-agent:v1.0.1
+  imagePullPolicy: IfNotPresent
+  replicas: 1
+  port: 8300
+  secretName: woo-agent-secrets
+  gatewayUrl: http://woo-gateway.woo-platform.svc.cluster.local:8100/mcp
+  groqModel: openai/gpt-oss-120b
+  maxSteps: "5"
+
+gateway:
+  enabled: true
+  image: woo-gateway:v1.0.1
+  imagePullPolicy: IfNotPresent
+  replicas: 1
+  port: 8100
+  dataClaim: gateway-data
+
+registry:
+  enabled: true
+  image: woo-gateway:v1.0.1
+  imagePullPolicy: IfNotPresent
+  replicas: 1
+  port: 8101
+  dataClaim: gateway-data
+
+wooMcp:
+  enabled: true
+  image: woo-mcp-service:local
+  imagePullPolicy: IfNotPresent
+  replicas: 1
+  port: 8000
+  storeUrl: http://woo-platform-wordpress
+  credentialsSecret: woocommerce-api-credentials
+
+resources:
+  wooMcp:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  frontend:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi

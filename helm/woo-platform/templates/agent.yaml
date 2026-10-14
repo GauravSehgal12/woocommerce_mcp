@@ -1,0 +1,60 @@
+﻿{{- if .Values.agent.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: woo-agent
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: {{ .Values.agent.replicas }}
+  selector:
+    matchLabels:
+      app: woo-agent
+  template:
+    metadata:
+      labels:
+        app: woo-agent
+    spec:
+      containers:
+        - name: woo-agent
+          image: {{ .Values.agent.image | quote }}
+          imagePullPolicy: {{ .Values.agent.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.agent.port }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.agent.secretName }}
+          env:
+            - name: MCP_GATEWAY_URL
+              value: {{ .Values.agent.gatewayUrl | quote }}
+            - name: GROQ_MODEL
+              value: {{ .Values.agent.groqModel | quote }}
+            - name: AGENT_MAX_STEPS
+              value: {{ .Values.agent.maxSteps | quote }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: woo-agent
+  namespace: {{ .Values.namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: woo-agent
+  ports:
+    - name: http
+      port: 8300
+      targetPort: 8300
+{{- end }}

@@ -11,3 +11,4 @@ __pycache__/
 # Runtime data
 /app/Gateway/data/health.json
 /app/Gateway/data/security.db
+.helm-backup
