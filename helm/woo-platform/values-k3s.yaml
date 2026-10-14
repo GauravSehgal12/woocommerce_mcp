@@ -27,6 +27,12 @@ wooMcp:
   imagePullPolicy: IfNotPresent
   replicas: 1
 
+gatewayDataPvc:
+  create: true
+  name: gateway-data
+  size: 1Gi
+  storageClass: local-path
+
 ingress:
   enabled: true
   className: traefik
