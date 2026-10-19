@@ -267,6 +267,68 @@ def get_order(order_id: int) -> dict[str, Any]:
 
 
 @mcp.tool()
+def create_order(
+    product_id: int,
+    quantity: int,
+    customer_email: str,
+    customer_first_name: str,
+    customer_last_name: str,
+    confirm_order: bool,
+    billing_address_1: str = "",
+    billing_city: str = "",
+    billing_postcode: str = "",
+    billing_country: str = "IN",
+) -> dict[str, Any]:
+    """Create a WooCommerce order after the customer has explicitly confirmed the displayed order summary.
+
+    Before calling this tool, show the customer the product, quantity, and price/total
+    when available, and ask for explicit confirmation. Set confirm_order=True only
+    after the customer confirms. This creates an order through the WooCommerce REST
+    API; it does not complete a storefront checkout or process a payment.
+    """
+    if not confirm_order:
+        raise ValueError(
+            "Order was not created. Show the order summary and obtain explicit customer confirmation first."
+        )
+    if product_id < 1:
+        raise ValueError("product_id must be positive.")
+    if quantity < 1 or quantity > 100:
+        raise ValueError("quantity must be between 1 and 100.")
+    if not customer_email.strip() or "@" not in customer_email:
+        raise ValueError("A valid customer email is required.")
+    if not customer_first_name.strip() or not customer_last_name.strip():
+        raise ValueError("Customer first and last names are required.")
+    if billing_country.strip().upper() != "IN":
+        raise ValueError("This order tool currently supports billing country IN only.")
+
+    payload: dict[str, Any] = {
+        "status": "pending",
+        "billing": {
+            "first_name": customer_first_name.strip(),
+            "last_name": customer_last_name.strip(),
+            "email": customer_email.strip(),
+            "address_1": billing_address_1.strip(),
+            "city": billing_city.strip(),
+            "postcode": billing_postcode.strip(),
+            "country": "IN",
+        },
+        "line_items": [{"product_id": product_id, "quantity": quantity}],
+        "set_paid": False,
+    }
+
+    order = api_request("POST", "orders", payload=payload)
+    return {
+        "id": order["id"],
+        "status": order["status"],
+        "total": order["total"],
+        "currency": order["currency"],
+        "date_created": order.get("date_created"),
+        "payment_processed": False,
+        "message": "WooCommerce order created. Payment has not been processed.",
+    }
+
+
+@mcp.tool()
 def update_order(
     order_id: int,
     status: str | None = None,
