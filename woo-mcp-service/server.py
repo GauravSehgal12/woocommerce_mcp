@@ -130,10 +130,10 @@ def create_product(
     name: str,
     regular_price: str,
     description: str = "",
-    status: str = "draft",
+    status: str = "publish",
     sku: str = "",
 ) -> dict[str, Any]:
-    """Create a WooCommerce product. Products default to draft status."""
+    """Create a WooCommerce product. Products are published by default unless another valid status is explicitly requested."""
     if not name.strip():
         raise ValueError("Product name cannot be empty.")
     if status not in {"draft", "publish", "pending", "private"}:
