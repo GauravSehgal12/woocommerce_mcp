@@ -469,6 +469,8 @@ def update_server(
     changes = payload.model_dump(exclude_unset=True)
     if not changes:
         raise HTTPException(status_code=400, detail="Provide at least one field to update.")
+    if any(value is None for value in changes.values()):
+        raise HTTPException(status_code=400, detail="Updated fields cannot be null; use an empty headers object to clear headers.")
 
     if "name" in changes:
         name = (changes["name"] or "").strip()
@@ -665,7 +667,7 @@ async def api_available_tools(admin: dict = Depends(require_role("admin"))):
     """Discover fully-qualified tool names from enabled upstream MCP servers."""
     with registry_lock:
         servers = read_registry()
-    available, warnings = [], []
+    candidates, warnings = [], []
     for server in servers:
         if not server.get("enabled", False):
             continue
@@ -684,8 +686,9 @@ async def api_available_tools(admin: dict = Depends(require_role("admin"))):
 
             result = await asyncio.wait_for(discover_tools(), timeout=5)
             for tool in result.tools:
-                available.append({
-                    "name": f"{server['name']}__{tool.name}",
+                candidates.append({
+                    "base_name": f"{server['name']}__{tool.name}",
+                    "server_id": server["id"],
                     "server_name": server["name"],
                     "tool_name": tool.name,
                     "description": tool.description or "",
@@ -707,6 +710,29 @@ async def api_available_tools(admin: dict = Depends(require_role("admin"))):
                     if unreachable else f"Tool discovery failed ({error_type})."
                 ),
             })
+
+    name_counts: dict[str, int] = {}
+    for candidate in candidates:
+        key = candidate["base_name"].casefold()
+        name_counts[key] = name_counts.get(key, 0) + 1
+
+    available = []
+    used_names: set[str] = set()
+    for candidate in candidates:
+        name = candidate["base_name"]
+        server_id_compact = candidate["server_id"].replace("-", "")
+        if name_counts[name.casefold()] > 1:
+            name = f"{name}__{server_id_compact[:8]}"
+        if name.casefold() in used_names:
+            name = f"{candidate['base_name']}__{server_id_compact[:16]}"
+        used_names.add(name.casefold())
+        available.append({
+            "name": name,
+            "server_name": candidate["server_name"],
+            "tool_name": candidate["tool_name"],
+            "description": candidate["description"],
+        })
+
     available.sort(key=lambda item: item["name"].lower())
     return {"tools": available, "warnings": warnings}
 
