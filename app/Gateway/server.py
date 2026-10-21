@@ -6,7 +6,7 @@ import inspect
 import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Annotated, cast
 
@@ -106,7 +106,7 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def summarize_exception(exc: BaseException) -> str:
+def summarize_exception(exc: BaseException, timeout_seconds: int = 10) -> str:
     """Return a useful, sanitized audit message for a failed tool call."""
     exceptions = []
 
@@ -120,21 +120,20 @@ def summarize_exception(exc: BaseException) -> str:
     collect(exc)
 
     # Prefer specific, actionable causes over the outer ExceptionGroup.
-    if any(isinstance(e, (TimeoutError, asyncio.TimeoutError))
-           for e in exceptions):
-        return "Tool execution timed out"
-
-    if any(isinstance(e, ConnectionRefusedError) for e in exceptions):
-        return "MCP server unavailable: connection refused"
-
     if any(
-        isinstance(e, OSError) and getattr(e, "errno", None) in (111, 10061)
+        isinstance(e, (TimeoutError, asyncio.TimeoutError))
+        or type(e).__name__.lower().endswith("timeout")
         for e in exceptions
     ):
-        return "MCP server unavailable: connection failed"
+        return f"Upstream request timed out after {timeout_seconds} seconds."
 
-    if any(isinstance(e, ConnectionError) for e in exceptions):
-        return "MCP server connection failed"
+    if any(
+        isinstance(e, (ConnectionError, ConnectionRefusedError))
+        or (isinstance(e, OSError) and getattr(e, "errno", None) in (111, 10061))
+        or type(e).__name__ in {"ConnectError", "NetworkError", "RemoteProtocolError"}
+        for e in exceptions
+    ):
+        return "Upstream MCP server is unreachable. Check its URL and network connectivity."
 
     if any(type(e).__name__ == "ValidationError" for e in exceptions):
         return "Tool argument validation failed"
@@ -207,12 +206,25 @@ def python_type_from_json_schema(schema: dict) -> type:
     return cast(type, type_map.get(cast(str, schema_type), Any))
 
 
+DISCOVERY_TIMEOUT_SECONDS = 5
+TOOL_CALL_TIMEOUT_SECONDS = 10
+
+
 async def fetch_tools(server: dict) -> list:
-    async with streamablehttp_client(server["url"]) as (read_stream, write_stream, _):
-        async with ClientSession(read_stream, write_stream) as client:
-            await client.initialize()
-            result = await client.list_tools()
-            return result.tools
+    """Discover upstream tools with a bounded timeout and configured credentials."""
+    async def discover() -> list:
+        async with streamablehttp_client(
+            server["url"],
+            headers=server.get("headers") or {},
+            timeout=timedelta(seconds=DISCOVERY_TIMEOUT_SECONDS),
+            sse_read_timeout=timedelta(seconds=DISCOVERY_TIMEOUT_SECONDS),
+        ) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as client:
+                await client.initialize()
+                result = await client.list_tools()
+                return result.tools
+
+    return await asyncio.wait_for(discover(), timeout=DISCOVERY_TIMEOUT_SECONDS)
 
 
 def make_handler(
@@ -220,6 +232,7 @@ def make_handler(
     server_name: str,
     server_url: str,
     upstream_tool_name: str,
+    gateway_tool_name: str,
     description: str,
 ):
     async def handler(**kwargs):
@@ -270,10 +283,24 @@ def make_handler(
                     "error": f"Permission denied for tool '{gateway_tool_name}'.",
                 }
 
-            async with streamablehttp_client(server_url) as (read_stream, write_stream, _):
-                async with ClientSession(read_stream, write_stream) as client:
-                    await client.initialize()
-                    result = await client.call_tool(upstream_tool_name, arguments=kwargs)
+            async def call_upstream():
+                async with streamablehttp_client(
+                    server_url,
+                    headers=server.get("headers") or {},
+                    timeout=timedelta(seconds=TOOL_CALL_TIMEOUT_SECONDS),
+                    sse_read_timeout=timedelta(seconds=TOOL_CALL_TIMEOUT_SECONDS),
+                ) as (read_stream, write_stream, _):
+                    async with ClientSession(read_stream, write_stream) as client:
+                        await client.initialize()
+                        return await client.call_tool(
+                            upstream_tool_name,
+                            arguments=kwargs,
+                        )
+
+            result = await asyncio.wait_for(
+                call_upstream(),
+                timeout=TOOL_CALL_TIMEOUT_SECONDS,
+            )
 
             if result.isError:
                 outcome = "error"
@@ -293,11 +320,12 @@ def make_handler(
         except Exception as exc:
             outcome = "error"
             details = summarize_exception(exc)
+            message = details or "Upstream tool call failed."
             return {
-            "upstream": server_name,
-            "tool": upstream_tool_name,
-            "is_error": True,
-            "error": "Upstream tool call failed.",
+                "upstream": server_name,
+                "tool": upstream_tool_name,
+                "is_error": True,
+                "error": message,
             }
 
         
@@ -319,10 +347,10 @@ def make_handler(
     return handler
 
 
-def register_tool(server: dict, tool) -> None:
+def register_tool(server: dict, tool, gateway_name: str | None = None) -> None:
     server_name = server["name"]
     upstream_name = tool.name
-    gateway_name = f"{server_name}__{upstream_name}"
+    gateway_name = gateway_name or f"{server_name}__{upstream_name}"
     input_schema = tool.inputSchema or {}
     properties = input_schema.get("properties", {})
     required = set(input_schema.get("required", []))
@@ -349,7 +377,7 @@ def register_tool(server: dict, tool) -> None:
 
     handler = make_handler(
         server["id"], server_name, server["url"], upstream_name,
-        tool.description or "",
+        gateway_name, tool.description or "",
     )
     handler.__name__ = gateway_name
     handler.__signature__ = inspect.Signature(parameters)
@@ -392,7 +420,7 @@ async def sync_tools() -> None:
         if not server.get("enabled", False) and server.get("id"):
             update_server_health(health_status, server, status="disabled")
 
-    desired_tools: dict[str, tuple[dict, Any]] = {}
+    discovered_candidates: list[tuple[dict, Any]] = []
     successfully_discovered_ids: set[str] = set()
 
     for server in servers:
@@ -411,17 +439,36 @@ async def sync_tools() -> None:
                 discovered_tools_count=len(tools),
             )
             for tool in tools:
-                desired_tools[f"{server_name}__{tool.name}"] = (server, tool)
+                discovered_candidates.append((server, tool))
             print(f"Discovered {len(tools)} tools from {server_name}")
         except Exception as exc:
             update_server_health(
                 health_status, server, status="unhealthy",
-                error=type(exc).__name__,
+                error=summarize_exception(exc, timeout_seconds=DISCOVERY_TIMEOUT_SECONDS),
             )
             print(
                 f"Health check failed for {server_name}; "
                 f"preserving existing tools ({type(exc).__name__})"
             )
+
+    # Keep the readable server__tool name unless multiple upstream tools map
+    # to the same name. In that case, append the stable server UUID prefix.
+    base_name_counts: dict[str, int] = {}
+    for candidate_server, candidate_tool in discovered_candidates:
+        base_name = f"{candidate_server['name']}__{candidate_tool.name}"
+        normalized_base_name = base_name.casefold()
+        base_name_counts[normalized_base_name] = base_name_counts.get(normalized_base_name, 0) + 1
+
+    desired_tools: dict[str, tuple[dict, Any]] = {}
+    for candidate_server, candidate_tool in discovered_candidates:
+        base_name = f"{candidate_server['name']}__{candidate_tool.name}"
+        gateway_name = base_name
+        if base_name_counts[base_name.casefold()] > 1:
+            gateway_name = f"{base_name}__{candidate_server['id'].replace('-', '')[:8]}"
+        if gateway_name in desired_tools:
+            # Defensive fallback if two UUID prefixes happen to collide.
+            gateway_name = f"{base_name}__{candidate_server['id'].replace('-', '')[:16]}"
+        desired_tools[gateway_name] = (candidate_server, candidate_tool)
 
     for name, existing in list(registered_tools.items()):
         server_id = existing["server_id"]
@@ -451,7 +498,7 @@ async def sync_tools() -> None:
     for name, (server, tool) in desired_tools.items():
         if name not in registered_tools:
             try:
-                register_tool(server, tool)
+                register_tool(server, tool, gateway_name=name)
             except Exception as exc:
                 print(f"Could not register {name}: {type(exc).__name__}")
 
