@@ -1,4 +1,5 @@
 
+import asyncio
 import json
 import os
 import re
@@ -106,6 +107,15 @@ class ServerCreate(BaseModel):
     name: str = Field(min_length=2, max_length=80)
     url: str = Field(min_length=8, max_length=500)
     description: str = Field(default="", max_length=500)
+    headers: dict[str, str] = Field(default_factory=dict, max_length=50)
+
+
+class ServerUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=80)
+    url: str | None = Field(default=None, min_length=8, max_length=500)
+    description: str | None = Field(default=None, max_length=500)
+    enabled: bool | None = None
+    headers: dict[str, str] | None = Field(default=None, max_length=50)
 
 
 class CreateUserRequest(BaseModel):
@@ -225,6 +235,33 @@ def find_server(servers: list[dict], server_id: str) -> dict:
     )
 
 
+def validate_upstream_headers(headers: dict[str, str]) -> dict[str, str]:
+    """Validate custom upstream headers before persisting them."""
+    if len(headers) > 50:
+        raise HTTPException(status_code=400, detail="At most 50 upstream headers are allowed.")
+    blocked = {"host", "content-length", "connection", "transfer-encoding"}
+    clean: dict[str, str] = {}
+    for name, value in headers.items():
+        normalized_name = name.strip()
+        if not re.fullmatch(r"[A-Za-z0-9!#$%&'*+.^_|~-]+", normalized_name):
+            raise HTTPException(status_code=400, detail="An upstream header name is invalid.")
+        if normalized_name.lower() in blocked:
+            raise HTTPException(status_code=400, detail=f"The {normalized_name} header cannot be overridden.")
+        if not isinstance(value, str) or len(value) > 4096 or chr(13) in value or chr(10) in value:
+            raise HTTPException(status_code=400, detail=f"The value for header {normalized_name} is invalid.")
+        clean[normalized_name] = value
+    return clean
+
+
+def public_server(server: dict) -> dict:
+    """Do not expose upstream credential values in registry responses."""
+    result = dict(server)
+    headers = result.pop("headers", {}) or {}
+    result["configured_header_names"] = sorted(headers.keys())
+    result["has_upstream_headers"] = bool(headers)
+    return result
+
+
 # ---------------------------------------------------------
 # Health
 # ---------------------------------------------------------
@@ -299,7 +336,7 @@ def list_servers(
 
     return {
         "count": len(servers),
-        "servers": servers,
+        "servers": [public_server(server) for server in servers],
     }
 
 
@@ -329,6 +366,8 @@ def list_servers_health(
                 "name": server.get("name"),
                 "url": server.get("url"),
                 "enabled": server.get("enabled", False),
+                "configured_header_names": sorted((server.get("headers") or {}).keys()),
+                "has_upstream_headers": bool(server.get("headers")),
                 "status": current_status,
                 "last_checked": record.get("last_checked"),
                 "last_successful_check": record.get(
@@ -375,6 +414,7 @@ def register_server(
         )
 
     normalized_url = validate_server_url(payload.url)
+    normalized_headers = validate_upstream_headers(payload.headers)
 
     with registry_lock:
         servers = read_registry()
@@ -404,6 +444,7 @@ def register_server(
             "name": normalized_name,
             "url": normalized_url,
             "description": payload.description.strip(),
+            "headers": normalized_headers,
             "enabled": True,
             "created_at": now,
             "updated_at": now,
@@ -414,8 +455,55 @@ def register_server(
 
     return {
         "message": "Server registered.",
-        "server": server,
+        "server": public_server(server),
     }
+
+
+@app.patch("/servers/{server_id}")
+def update_server(
+    server_id: str,
+    payload: ServerUpdate,
+    admin: dict = Depends(require_role("admin")),
+):
+    """Partially update an upstream MCP server's metadata and credentials."""
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=400, detail="Provide at least one field to update.")
+
+    if "name" in changes:
+        name = (changes["name"] or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
+            raise HTTPException(status_code=400, detail="Name must contain only letters, numbers, underscores, or hyphens.")
+        changes["name"] = name
+
+    if "url" in changes:
+        changes["url"] = validate_server_url(changes["url"])
+
+    if "description" in changes:
+        changes["description"] = (changes["description"] or "").strip()
+
+    if "headers" in changes and changes["headers"] is not None:
+        changes["headers"] = validate_upstream_headers(changes["headers"])
+
+    with registry_lock:
+        servers = read_registry()
+        current = find_server(servers, server_id)
+
+        next_name = changes.get("name", current["name"])
+        next_url = changes.get("url", current["url"])
+        for other in servers:
+            if other.get("id") == server_id:
+                continue
+            if other.get("name", "").lower() == next_name.lower():
+                raise HTTPException(status_code=409, detail="A server with this name already exists.")
+            if other.get("url") == next_url:
+                raise HTTPException(status_code=409, detail="A server with this URL is already registered.")
+
+        current.update(changes)
+        current["updated_at"] = datetime.now(timezone.utc).isoformat()
+        write_registry(servers)
+
+    return {"message": "Server updated.", "server": public_server(current)}
 
 
 @app.patch("/servers/{server_id}/disable")
@@ -582,10 +670,19 @@ async def api_available_tools(admin: dict = Depends(require_role("admin"))):
         if not server.get("enabled", False):
             continue
         try:
-            async with streamablehttp_client(server["url"]) as (read_stream, write_stream, _):
-                async with ClientSession(read_stream, write_stream) as client:
-                    await client.initialize()
-                    result = await client.list_tools()
+            async def discover_tools():
+                from datetime import timedelta
+                async with streamablehttp_client(
+                    server["url"],
+                    headers=server.get("headers") or {},
+                    timeout=timedelta(seconds=5),
+                    sse_read_timeout=timedelta(seconds=5),
+                ) as (read_stream, write_stream, _):
+                    async with ClientSession(read_stream, write_stream) as client:
+                        await client.initialize()
+                        return await client.list_tools()
+
+            result = await asyncio.wait_for(discover_tools(), timeout=5)
             for tool in result.tools:
                 available.append({
                     "name": f"{server['name']}__{tool.name}",
@@ -593,10 +690,22 @@ async def api_available_tools(admin: dict = Depends(require_role("admin"))):
                     "tool_name": tool.name,
                     "description": tool.description or "",
                 })
-        except Exception as exc:
+        except (TimeoutError, asyncio.TimeoutError):
             warnings.append({
                 "server_name": server.get("name", "unknown"),
-                "error": f"Tool discovery failed ({type(exc).__name__}).",
+                "error": "Tool discovery timed out after 5 seconds.",
+            })
+        except Exception as exc:
+            error_type = type(exc).__name__
+            unreachable = isinstance(exc, (ConnectionError, OSError)) or error_type in {
+                "ConnectError", "NetworkError", "RemoteProtocolError"
+            }
+            warnings.append({
+                "server_name": server.get("name", "unknown"),
+                "error": (
+                    "Upstream MCP server is unreachable. Check its URL and network connectivity."
+                    if unreachable else f"Tool discovery failed ({error_type})."
+                ),
             })
     available.sort(key=lambda item: item["name"].lower())
     return {"tools": available, "warnings": warnings}
