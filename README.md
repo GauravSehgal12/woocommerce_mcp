@@ -15,6 +15,12 @@ A local Kubernetes-based platform for connecting WooCommerce and supporting serv
 - [Access the application](#access-the-application)
 - [Example workflows](#example-workflows)
 - [Security and audit checks](#security-and-audit-checks)
+- [REST API and MCP rationale](#why-rest-for-administration-and-mcp-for-tools)
+- [Upstream credentials and server editing](#upstream-credentials-and-server-editing)
+- [Timeouts and error handling](#timeouts-and-upstream-errors)
+- [Tool naming and collisions](#tool-naming-and-collision-handling)
+- [k3s / production-like deployment](#k3s--production-like-deployment)
+- [Known limitations](#known-limitations)
 - [Troubleshooting](#troubleshooting)
 - [Data safety](#data-safety)
 
@@ -246,6 +252,95 @@ A successful COD checkout validates the storefront checkout path. It does not, b
 - Check the audit log for the rejected attempt if rejected requests are configured to be recorded.
 - Confirm audit events show the relevant user, server/tool, timestamp, duration, and outcome where those fields are available.
 - Do not share API key values in logs, screenshots, or issue reports.
+
+
+## Why REST for administration and MCP for tools?
+
+The platform uses **REST endpoints for control-plane operations**—such as registering, editing, enabling/disabling, and removing servers; managing users and API keys; and querying health or audit logs. These operations map naturally to HTTP resource semantics, browser-based forms, status codes, and role-based authorization.
+
+The gateway exposes discovered upstream capabilities through **MCP** so compatible agents and clients can list and call tools using the MCP protocol. In short: REST manages the platform; MCP carries tool discovery and invocation.
+
+## Upstream credentials and server editing
+
+Administrators can configure custom upstream HTTP headers when registering a server and update server metadata or credentials through the admin-only endpoint:
+
+```http
+PATCH /servers/{server_id}
+Content-Type: application/json
+```
+
+Example request body (replace the placeholder with a credential from your secret manager; never commit a real token):
+
+```json
+{
+  "description": "Inventory MCP server",
+  "headers": {
+    "Authorization": "Bearer <UPSTREAM_TOKEN>"
+  }
+}
+```
+
+Omitted fields remain unchanged. To replace the configured header set, send a new `headers` object. Use an empty object to clear custom headers. Header values are intentionally omitted from server-list, health, create, update, enable, and disable responses; responses include only whether headers are configured and their names. The endpoint is admin-only and validates header names and values.
+
+**Credential storage limitation:** in this implementation, upstream header values are stored in the gateway's registry JSON file. Protect that file and its persistent volume with restrictive permissions and backups. For production, prefer a secrets manager or Kubernetes Secret references and avoid storing raw credential values in ordinary registry JSON.
+
+## Timeouts and upstream errors
+
+- Tool invocation has a **10-second overall timeout**.
+- Upstream tool discovery and available-tool listing use a **5-second overall timeout**.
+- Timeout failures are reported separately from an unreachable upstream server. Check the URL, DNS, network policies, TLS configuration, and upstream availability when a server is reported unreachable.
+- Timeouts bound the gateway's wait; they do not guarantee that a remote operation has been rolled back. For non-idempotent upstream actions, verify the remote state before retrying after a timeout.
+
+## Tool naming and collision handling
+
+Discovered tools normally use the readable name `<server_name>__<tool_name>`. If two upstream entries would produce a case-insensitive name collision, the gateway adds a deterministic suffix derived from the upstream server's ID, for example:
+
+```text
+inventory__check_stock__a1b2c3d4
+```
+
+The suffix is derived from the registered server ID, not a credential. Registering a server with a duplicate name is rejected. If a collision suffix changes after a server's identity or registration changes, refresh the client's discovered tool list.
+
+## k3s / production-like deployment
+
+The repository includes `helm/woo-platform/values-k3s.yaml` as a starting point for a k3s environment. Before deploying:
+
+1. Build and publish the required container images to a registry accessible by the k3s nodes, then set immutable or versioned image tags in the values file.
+2. Configure Kubernetes Secrets for application keys, WooCommerce API credentials, database passwords, and LLM provider keys. Do not commit secrets or put them directly in Helm values.
+3. Review storage classes and PVCs. The sample values use the `local-path` storage class for gateway data; ensure your k3s cluster has a suitable storage provisioner and a backup/restore plan.
+4. Set resource requests/limits and replicas based on expected traffic. Test upgrades and rollbacks in a staging namespace first.
+5. Use TLS, network policies, restricted service accounts, and a supported secret-management strategy before exposing the services publicly.
+6. Verify the actual chart values and deployment names before applying changes.
+
+Example template/upgrade commands (run from the repository root):
+
+```bash
+helm template woo-apps ./helm/woo-platform \
+  --namespace woo-platform \
+  -f ./helm/woo-platform/values-k3s.yaml
+
+helm upgrade --install woo-apps ./helm/woo-platform \
+  --namespace woo-platform \
+  --create-namespace \
+  -f ./helm/woo-platform/values-k3s.yaml
+```
+
+These commands render/install the chart; they do not provision DNS, TLS certificates, external databases, or cloud secrets automatically.
+
+### Ingress approach
+
+The Helm chart uses a Kubernetes Ingress resource to route the dashboard and storefront by host name. The local Kind values use the NGINX ingress class and local hostnames; the sample k3s values use Traefik and example hostnames. Configure DNS records to point to the ingress controller, and configure TLS certificates through your chosen certificate workflow (for example, cert-manager) before using public hostnames. Keep the gateway and registry management endpoints private unless they are deliberately exposed behind appropriate authentication and network controls.
+
+## Known limitations
+
+- This is a development-oriented platform, not a fully audited production service.
+- Custom upstream headers are currently persisted in the gateway registry JSON file; use a secret manager or Secret references for production.
+- The gateway rate limiter is in-memory and per process. Multiple replicas need a shared limiter or ingress-level rate limiting for a global quota.
+- The registry and health status are file-backed. Concurrent writers, multi-replica deployments, and recovery require additional coordination and durable storage design.
+- Timeout errors do not prove that an upstream mutation did not occur; verify state before retrying non-idempotent calls.
+- Tool discovery depends on upstream MCP servers being reachable and compatible with the configured Streamable HTTP transport.
+- The sample k3s values are a starting point and do not constitute complete production hardening, high availability, monitoring, backups, or disaster recovery.
+- Storefront COD checkout and MCP-created pending orders are separate workflows and should be tested independently.
 
 ## Troubleshooting
 
