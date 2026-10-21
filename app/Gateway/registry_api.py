@@ -525,7 +525,7 @@ def disable_server(
 
     return {
         "message": "Server disabled.",
-        "server": server,
+        "server": public_server(server),
     }
 
 
@@ -548,7 +548,7 @@ def enable_server(
 
     return {
         "message": "Server enabled.",
-        "server": server,
+        "server": public_server(server),
     }
 
 
