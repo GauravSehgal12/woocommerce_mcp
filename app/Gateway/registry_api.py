@@ -717,10 +717,15 @@ async def api_available_tools(admin: dict = Depends(require_role("admin"))):
         name_counts[key] = name_counts.get(key, 0) + 1
 
     available = []
+    used_names: set[str] = set()
     for candidate in candidates:
         name = candidate["base_name"]
+        server_id_compact = candidate["server_id"].replace("-", "")
         if name_counts[name.casefold()] > 1:
-            name = f"{name}__{candidate['server_id'].replace('-', '')[:8]}"
+            name = f"{name}__{server_id_compact[:8]}"
+        if name.casefold() in used_names:
+            name = f"{candidate['base_name']}__{server_id_compact[:16]}"
+        used_names.add(name.casefold())
         available.append({
             "name": name,
             "server_name": candidate["server_name"],
