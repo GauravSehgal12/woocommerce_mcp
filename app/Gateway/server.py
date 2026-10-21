@@ -106,7 +106,7 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def summarize_exception(exc: BaseException) -> str:
+def summarize_exception(exc: BaseException, timeout_seconds: int = 10) -> str:
     """Return a useful, sanitized audit message for a failed tool call."""
     exceptions = []
 
@@ -125,7 +125,7 @@ def summarize_exception(exc: BaseException) -> str:
         or type(e).__name__.lower().endswith("timeout")
         for e in exceptions
     ):
-        return f"Upstream request timed out after {TOOL_CALL_TIMEOUT_SECONDS} seconds."
+        return f"Upstream request timed out after {timeout_seconds} seconds."
 
     if any(
         isinstance(e, (ConnectionError, ConnectionRefusedError))
@@ -444,7 +444,7 @@ async def sync_tools() -> None:
         except Exception as exc:
             update_server_health(
                 health_status, server, status="unhealthy",
-                error=type(exc).__name__,
+                error=summarize_exception(exc, timeout_seconds=DISCOVERY_TIMEOUT_SECONDS),
             )
             print(
                 f"Health check failed for {server_name}; "
@@ -456,13 +456,14 @@ async def sync_tools() -> None:
     base_name_counts: dict[str, int] = {}
     for candidate_server, candidate_tool in discovered_candidates:
         base_name = f"{candidate_server['name']}__{candidate_tool.name}"
-        base_name_counts[base_name] = base_name_counts.get(base_name, 0) + 1
+        normalized_base_name = base_name.casefold()
+        base_name_counts[normalized_base_name] = base_name_counts.get(normalized_base_name, 0) + 1
 
     desired_tools: dict[str, tuple[dict, Any]] = {}
     for candidate_server, candidate_tool in discovered_candidates:
         base_name = f"{candidate_server['name']}__{candidate_tool.name}"
         gateway_name = base_name
-        if base_name_counts[base_name] > 1:
+        if base_name_counts[base_name.casefold()] > 1:
             gateway_name = f"{base_name}__{candidate_server['id'].replace('-', '')[:8]}"
         if gateway_name in desired_tools:
             # Defensive fallback if two UUID prefixes happen to collide.
